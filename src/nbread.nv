@@ -1,0 +1,162 @@
+// nbread — JSON text to a notebook.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// THE READER IS TOLERANT AND THE VALIDATOR IS NOT.  A notebook comes
+// out of a repository, a shared drive or somebody's laptop, and a tool
+// that refused to open one because its third cell was missing an
+// identifier would be a tool nobody could use to FIX that notebook.  So
+// `read` refuses only what makes the document unreadable — text that is
+// not JSON, a top-level value that is not an object, an `nbformat` that
+// is missing or names a major version this package does not read — and
+// hands back a notebook with every shape complaint beside it.
+//
+// `read_strict` is the same walk with the first issue turned into a
+// fault.  A pipeline that must not accept a malformed notebook uses it,
+// and a tool that has to open one uses `read`.
+//
+// WHAT TOLERANT MEANS, EXACTLY.  Each recovery is named, so a reader of
+// this file knows what was decided rather than what happened to be
+// easy: a missing `metadata` becomes an empty object; a missing
+// `cells` becomes no cells; a cell with no `id` keeps an empty one; a
+// cell with an unknown `cell_type` is dropped, because there is nothing
+// to show and guessing at somebody's source is worse than losing it;
+// an output with an unknown `output_type` is dropped for the same
+// reason; an `execution_count` that is not an integer becomes `None`.
+// Every one of those is an issue in the result.
+
+// A notebook, and what was wrong with the file it came from.
+//
+// The issues are the shape rules `nbvalidate` applies plus the
+// recoveries the reader performed, in document order.
+pub struct NbReading
+    // The notebook, with the recoveries already applied.
+    notebook: NbNotebook
+    // What the file did that the format does not allow.  Empty for a
+    // notebook that satisfies its own version's rules.
+    issues: [NbFault]
+
+// A notebook from the text of a `.ipynb` file.
+//
+// The four fatal refusals are `NbNotJson`, `NbNotAnObject`,
+// `NbNoFormatVersion` and `NbUnsupportedFormat`; everything else is an
+// issue on a notebook this still hands back.
+//
+// ```novo
+// use nbnotebook
+// use nbread
+//
+// fn main() [io]
+//     match nbread.read("{\"nbformat\":4,\"nbformat_minor\":5,\"cells\":[]}")
+//         Err(e) => println("not a notebook: ${e.message()}")
+//         Ok(r)  => println("${nbnotebook.cell_count(r.notebook)}")   // 0
+// ```
+pub fn read(text: Str) -> Result<NbReading, NbFault> []
+    todo("ipynb-nv.nbread.read")
+
+// The same, from a JSON value the caller has already parsed.
+//
+// For the caller that got the notebook out of a JSON API rather than
+// out of a file, and for a test that builds one.
+pub fn read_json(j: JsonValueH) -> Result<NbReading, NbFault> []
+    todo("ipynb-nv.nbread.read_json")
+
+// A notebook from text, with the first shape issue fatal.
+//
+// The reading a pipeline uses.  The notebook it answers has an empty
+// issue list by construction, so a caller never has to check one.
+//
+// ```novo
+// use nbread
+//
+// fn main() [io]
+//     match nbread.read_strict("{\"nbformat\":4,\"nbformat_minor\":5,\"cells\":[]}")
+//         Err(e) => println("refused: ${e.message()}")
+//         Ok(_)  => println("a notebook that satisfies its own version")
+// ```
+pub fn read_strict(text: Str) -> Result<NbNotebook, NbFault> []
+    todo("ipynb-nv.nbread.read_strict")
+
+// The format version the text declares, without reading the cells.
+//
+// What a tool that supports several formats calls first, and what a
+// caller deciding whether to open a large file at all reads.  The two
+// members are `nbformat` and `nbformat_minor`; the second is absent
+// before 4.0 and answers `0` then.
+//
+// ```novo
+// use nbread
+//
+// fn main() [io]
+//     match nbread.format_version("{\"nbformat\":4,\"nbformat_minor\":5}")
+//         Err(e) => println(e.message())
+//         Ok(v)  => println("${v.major}.${v.minor}")   // 4.5
+// ```
+pub fn format_version(text: Str) -> Result<NbVersion, NbFault> []
+    todo("ipynb-nv.nbread.format_version")
+
+// A notebook format version.
+pub struct NbVersion
+    // The major version.
+    major: Int
+    // The minor version, or `0` when the member is absent.
+    minor: Int
+
+// One cell from a JSON object.
+//
+// Exposed because a diff tool and an editor both work on cells rather
+// than on documents, and because the recoveries are the same ones.
+// `None` for an object whose `cell_type` this package does not know,
+// which is the one recovery that loses a cell.
+pub fn read_cell(j: JsonValueH) -> ?NbCell []
+    todo("ipynb-nv.nbread.read_cell")
+
+// One output from a JSON object, or `None` for an unknown
+// `output_type`.
+pub fn read_output(j: JsonValueH) -> ?NbOutput []
+    todo("ipynb-nv.nbread.read_output")
+
+// One MIME bundle from a JSON object.
+//
+// Every member becomes an entry, in the object's own order, with no
+// payload interpreted: a `text/plain` written as an array of lines is
+// still an array of lines here, and `nbcell.bundle_text` is what
+// collapses it.
+pub fn read_bundle(j: JsonValueH) -> NbMimeBundle []
+    todo("ipynb-nv.nbread.read_bundle")
+
+// The text of a multiline string, whichever of its two spellings the
+// value uses, or `None` for a value that is neither.
+//
+// nbformat's own term.  A JSON string is itself; a JSON array of
+// strings is their concatenation; anything else is not one.
+//
+// ```novo
+// use std.json
+// use nbread
+//
+// fn main() [io]
+//     match json.parse("[\"a\\n\", \"b\"]")
+//         None    => println("not JSON")
+//         Some(j) =>
+//             match nbread.multiline(j)
+//                 Some(s) => println(s)
+//                 None    => println("not a multiline string")
+// ```
+pub fn multiline(j: JsonValueH) -> ?Str []
+    todo("ipynb-nv.nbread.multiline")
+
+// Whether the text is a notebook this package will read at all.
+//
+// The four fatal checks and nothing else, with no document built. What
+// a file browser showing a list of files asks.
+//
+// ```novo
+// use nbread
+//
+// fn main() [io]
+//     println("${nbread.is_notebook("{}")}")   // false
+// ```
+pub fn is_notebook(text: Str) -> Bool []
+    todo("ipynb-nv.nbread.is_notebook")

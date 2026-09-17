@@ -1,0 +1,395 @@
+// nbcell — a cell, its outputs, the MIME bundles inside them, and the
+// attachments beside them.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// A MULTILINE STRING IS ONE TEXT, WRITTEN TWO WAYS.  nbformat calls a
+// `source`, a `text` and a text MIME payload a "multiline string", and
+// says it is either a JSON string or a JSON array of strings whose
+// concatenation is that string.  Both spellings appear in real files:
+// a notebook a human edited by hand has the first, a notebook Jupyter
+// saved has the second.
+//
+// This package reads either and holds ONE `Str`.  The split is not
+// information about the document — the text is the same text — and a
+// type that carried it would make every consumer handle two cases to
+// read one string.  The writer always emits the array-of-lines form,
+// because that is what makes a notebook diff line by line in git and
+// what nbformat's own writer produces.  `split_lines` is that split,
+// exposed, so a caller can see exactly what will be written.
+//
+// AN OUTPUT IS FOUR SHAPES AND NOT ONE.  A stream carries a name and
+// text; a display and an execute result carry a MIME bundle and
+// metadata, and the execute result carries an execution count as well;
+// an error carries a name, a value and a traceback.  They are four arms
+// rather than one struct with optional members, because a display with
+// an `ename` is not a document nbformat permits and a struct would have
+// made it representable.
+//
+// A MIME BUNDLE KEEPS ITS ORDER.  A bundle is a list of entries and not
+// a map, for the same reason a BSON document is: the order is in the
+// file, a writer that sorted it would produce a diff nobody asked for,
+// and the rules a validator applies are per entry.
+
+// What kind of cell this is.
+//
+// The three `cell_type` values nbformat 4.5 defines, and no more: an
+// unknown one is `NbUnknownCellType` at the reader, because a tool that
+// guessed would be guessing at somebody's source code.
+pub enum NbCellKind
+    // `"code"` — source to be executed, with outputs and an execution
+    // count.
+    NbCode
+    // `"markdown"` — prose, with attachments and no outputs.
+    NbMarkdown
+    // `"raw"` — text passed through to a converter untouched, with
+    // neither outputs nor an execution count.
+    NbRaw
+
+// One entry of a MIME bundle: a MIME type and the payload under it.
+//
+// The payload is a JSON value because the format makes it one. A
+// `text/plain` is a multiline string, an `image/png` is base64 text,
+// and an `application/json` is a JSON value of any shape — which is the
+// case that stops this being a `Str`.
+pub struct NbMimeEntry
+    // The MIME type, exactly as the file spells it: `"text/plain"`,
+    // `"image/png"`, `"application/vnd.plotly.v1+json"`.
+    mime: Str
+    // The payload.
+    payload: JsonValueH
+
+// The alternative renderings of one output, richest first is NOT
+// guaranteed — the order is the file's.
+//
+// A consumer picks by asking for the MIME types it can show, in its own
+// order of preference, which is what `bundle_get` is for.
+pub struct NbMimeBundle
+    // The entries, in file order.
+    entries: [NbMimeEntry]
+
+// One thing a code cell produced.
+//
+// Four arms, one per `output_type` nbformat 4.5 defines.
+pub enum NbOutput
+    // `"stream"` — what the process wrote to `stdout` or `stderr`.
+    // `name` is one of those two words.
+    NbStream(name: Str, text: Str)
+    // `"display_data"` — something the code asked to be displayed,
+    // offered in several MIME types at once.
+    NbDisplayData(data: NbMimeBundle, metadata: JsonValueH)
+    // `"execute_result"` — the value of the cell's last expression,
+    // offered in several MIME types at once, carrying the execution
+    // count it belongs to.
+    NbExecuteResult(count: Int, data: NbMimeBundle, metadata: JsonValueH)
+    // `"error"` — an exception.  `traceback` is the lines as the kernel
+    // formatted them, ANSI escape sequences included, because that is
+    // what the file holds and stripping them is the consumer's choice.
+    NbErrorOutput(ename: Str, evalue: Str, traceback: [Str])
+
+// A file a markdown cell carries with it, under a name its source
+// refers to as `attachment:<name>`.
+pub struct NbAttachment
+    // The name the cell's markdown refers to.
+    name: Str
+    // The renderings of the file.  Usually one, an `image/png`.
+    data: NbMimeBundle
+
+// One cell.
+//
+// ONE STRUCT FOR ALL THREE KINDS, with the members the other kinds may
+// not have held as empty rather than absent.  The alternative was three
+// structs, and it costs more than it saves: every consumer that walks a
+// notebook would match three ways to read a `source`, and the rules
+// about which member belongs to which kind are checked once, by
+// `nbvalidate`, where the message can name the cell.
+pub struct NbCell
+    // The cell identifier nbformat 4.5 requires: one to sixty-four
+    // characters of letters, digits, `-` and `_`, unique in the
+    // notebook.  Empty on a notebook read at 4.4 or below, where the
+    // member did not exist.
+    id: Str
+    // Which of the three kinds this is.
+    kind: NbCellKind
+    // The cell's text, with the two spellings of a multiline string
+    // already collapsed into one.
+    source: Str
+    // The cell's own metadata: arbitrary JSON, and the place a tool
+    // puts `collapsed`, `scrolled`, `tags` and its own keys.
+    metadata: JsonValueH
+    // What the cell produced.  Empty for a markdown or raw cell, and
+    // `NbForbiddenMember` from the validator if the file had any there.
+    outputs: [NbOutput]
+    // The execution count of a code cell, or `None` for one that has
+    // not been run.  `None` and zero are different: zero is a cell that
+    // ran first, and null is a cell that never ran.
+    execution_count: ?Int
+    // The files a markdown cell carries.  Empty for a code or raw cell.
+    attachments: [NbAttachment]
+
+// A code cell with the given identifier and source, no outputs and no
+// execution count.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     let c = nbcell.code_cell("a1b2c3d4", "print(1)")
+//     println(c.source)   // print(1)
+// ```
+pub fn code_cell(id: Str, source: Str) -> NbCell []
+    todo("ipynb-nv.nbcell.code_cell")
+
+// A markdown cell with the given identifier and source.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     println(nbcell.kind_name(nbcell.markdown_cell("x1", "# Title").kind))
+// ```
+pub fn markdown_cell(id: Str, source: Str) -> NbCell []
+    todo("ipynb-nv.nbcell.markdown_cell")
+
+// A raw cell with the given identifier and source.
+pub fn raw_cell(id: Str, source: Str) -> NbCell []
+    todo("ipynb-nv.nbcell.raw_cell")
+
+// The `cell_type` string for a kind: `"code"`, `"markdown"`, `"raw"`.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     println(nbcell.kind_name(NbRaw))   // raw
+// ```
+pub fn kind_name(k: NbCellKind) -> Str []
+    todo("ipynb-nv.nbcell.kind_name")
+
+// The kind a `cell_type` string names, or `None`.
+pub fn kind_named(name: Str) -> ?NbCellKind []
+    todo("ipynb-nv.nbcell.kind_named")
+
+// Whether a cell identifier satisfies the nbformat 4.5 rule: between
+// one and sixty-four characters, each a letter, a digit, `-` or `_`.
+//
+// THE ONE RULE 4.5 ADDED, and the reason it was added: a notebook's
+// cells had no stable names, so a comment on a cell, a diff that
+// matched cells across a save, and a tool that linked to one all had to
+// use its position, which changes when a cell above it is inserted.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     println("${nbcell.is_valid_cell_id("a1b2-c3_d4")}")   // true
+//     println("${nbcell.is_valid_cell_id("has a space")}")  // false
+// ```
+pub fn is_valid_cell_id(id: Str) -> Bool []
+    todo("ipynb-nv.nbcell.is_valid_cell_id")
+
+// `c` with a different identifier.
+//
+// THE FUNCTION THAT KEEPS THIS PACKAGE `core`.  A fresh cell identifier
+// is random, and this package may not read a random source, so a caller
+// that needs one generates it — one `[rand]` call, in the host, where
+// it is visible — and sets it here.  `is_valid_cell_id` is how it
+// checks what it generated.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     let c = nbcell.cell_id(nbcell.code_cell("", "print(1)"), "f00d")
+//     println(c.id)   // f00d
+// ```
+pub fn cell_id(c: NbCell, id: Str) -> NbCell []
+    todo("ipynb-nv.nbcell.cell_id")
+
+// `c` with its outputs replaced.
+//
+// The call a tool makes after a kernel answered.  Nothing here runs the
+// cell; the outputs arrive from whatever did.
+pub fn with_outputs(c: NbCell, outputs: [NbOutput]) -> NbCell []
+    todo("ipynb-nv.nbcell.with_outputs")
+
+// `c` with no outputs and no execution count.
+//
+// What "clear all outputs" is, and what a repository that keeps
+// notebooks under review runs before a commit.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     let c = nbcell.cleared(nbcell.code_cell("a1", "print(1)"))
+//     println("${list.len(c.outputs)}")   // 0
+// ```
+pub fn cleared(c: NbCell) -> NbCell []
+    todo("ipynb-nv.nbcell.cleared")
+
+// `c` with a different execution count, or none.
+pub fn with_execution_count(c: NbCell, count: ?Int) -> NbCell []
+    todo("ipynb-nv.nbcell.with_execution_count")
+
+// `c` with a different source.
+pub fn with_source(c: NbCell, source: Str) -> NbCell []
+    todo("ipynb-nv.nbcell.with_source")
+
+// `c` with a different metadata object.
+pub fn with_metadata(c: NbCell, metadata: JsonValueH) -> NbCell []
+    todo("ipynb-nv.nbcell.with_metadata")
+
+// `c` with one more attachment.
+pub fn with_attachment(c: NbCell, a: NbAttachment) -> NbCell []
+    todo("ipynb-nv.nbcell.with_attachment")
+
+// One attachment.
+pub fn attachment(name: Str, data: NbMimeBundle) -> NbAttachment []
+    todo("ipynb-nv.nbcell.attachment")
+
+// The text of a `"stream"` output whose name is `"stdout"`, joined in
+// file order, or `""`.
+//
+// What a test harness comparing a notebook's printed output against an
+// expectation reads, and the one question that would otherwise mean
+// walking four output arms.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     println(nbcell.stdout_text(nbcell.code_cell("a1", "print(1)")))   // (empty)
+// ```
+pub fn stdout_text(c: NbCell) -> Str []
+    todo("ipynb-nv.nbcell.stdout_text")
+
+// The first `"error"` output's exception name, or `None`.
+//
+// What tells a caller that a cell failed, which is otherwise a walk
+// over the outputs.
+pub fn first_error(c: NbCell) -> ?Str []
+    todo("ipynb-nv.nbcell.first_error")
+
+// The `output_type` string for an output: `"stream"`, `"display_data"`,
+// `"execute_result"`, `"error"`.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     println(nbcell.output_type_name(NbStream("stdout", "hi\n")))
+// ```
+pub fn output_type_name(o: NbOutput) -> Str []
+    todo("ipynb-nv.nbcell.output_type_name")
+
+// An empty MIME bundle.
+pub fn bundle() -> NbMimeBundle []
+    todo("ipynb-nv.nbcell.bundle")
+
+// `b` with one more entry at the end.
+pub fn bundle_with(b: NbMimeBundle, mime: Str, payload: JsonValueH) -> NbMimeBundle []
+    todo("ipynb-nv.nbcell.bundle_with")
+
+// The payload under a MIME type, or `None`.
+pub fn bundle_get(b: NbMimeBundle, mime: Str) -> ?JsonValueH []
+    todo("ipynb-nv.nbcell.bundle_get")
+
+// Every MIME type in the bundle, in file order.
+//
+// What a consumer matches against the types it can show.
+pub fn bundle_mimes(b: NbMimeBundle) -> [Str] []
+    todo("ipynb-nv.nbcell.bundle_mimes")
+
+// The first MIME type in a caller's preference list that the bundle
+// has, or `None`.
+//
+// THE FUNCTION A RENDERER WANTS.  The bundle's own order is the file's
+// and says nothing about which rendering is best, so the choice belongs
+// to whoever is going to draw it: a terminal asks for `text/plain`
+// first, a browser for `text/html`, an image viewer for `image/png`.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     match nbcell.bundle_prefer(nbcell.bundle(), ["text/html", "text/plain"])
+//         Some(m) => println(m)
+//         None    => println("nothing this renderer can show")
+// ```
+pub fn bundle_prefer(b: NbMimeBundle, prefer: [Str]) -> ?Str []
+    todo("ipynb-nv.nbcell.bundle_prefer")
+
+// The payload under a MIME type as text, with a multiline string's two
+// spellings already collapsed, or `None`.
+//
+// `None` when the type is absent or the payload is not text at all —
+// an `application/json` payload is a JSON value and comes back through
+// `bundle_get`.
+pub fn bundle_text(b: NbMimeBundle, mime: Str) -> ?Str []
+    todo("ipynb-nv.nbcell.bundle_text")
+
+// The payload under a MIME type as bytes, decoded from the base64 the
+// file holds, or `None`.
+//
+// nbformat writes a binary rendering — an `image/png`, an
+// `application/pdf` — as base64 text, so this is the accessor a viewer
+// uses.  `None` when the type is absent, and `NbBadBase64` from the
+// validator when the text is not base64, because an accessor with no
+// error channel should not be the thing that reports a malformed file.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     match nbcell.bundle_bytes(nbcell.bundle(), "image/png")
+//         Some(_) => println("an image")
+//         None    => println("no image in this bundle")
+// ```
+pub fn bundle_bytes(b: NbMimeBundle, mime: Str) -> ?Bytes []
+    todo("ipynb-nv.nbcell.bundle_bytes")
+
+// Whether a MIME type is one nbformat writes as base64 rather than as
+// text.
+//
+// Everything outside `text/*`, `application/json` and the
+// `+json`-suffixed types.  The rule a writer applies and a validator
+// checks.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     println("${nbcell.is_base64_mime("image/png")}")            // true
+//     println("${nbcell.is_base64_mime("application/geo+json")}")  // false
+// ```
+pub fn is_base64_mime(mime: Str) -> Bool []
+    todo("ipynb-nv.nbcell.is_base64_mime")
+
+// A text split the way nbformat's writer splits a multiline string:
+// every line keeps its own `\n`, and the last line has none unless the
+// text ended with one.
+//
+// THE SPLIT THAT MAKES A NOTEBOOK DIFF.  A notebook whose source is one
+// long JSON string changes entirely when one line of it changes; a
+// notebook whose source is an array of lines changes by one line.  This
+// is the function the writer uses, exposed so a caller can see exactly
+// what will be written.
+//
+// ```novo
+// use nbcell
+//
+// fn main() [io]
+//     println("${list.len(nbcell.split_lines("a\nb\n"))}")   // 2
+// ```
+pub fn split_lines(text: Str) -> [Str] []
+    todo("ipynb-nv.nbcell.split_lines")
+
+// The inverse: the lines of a multiline string joined back into one
+// text.
+//
+// What the reader applies to the array spelling, so that both spellings
+// arrive as the same `Str`.
+pub fn join_lines(lines: [Str]) -> Str []
+    todo("ipynb-nv.nbcell.join_lines")

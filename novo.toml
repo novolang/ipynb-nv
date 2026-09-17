@@ -1,0 +1,55 @@
+[package]
+name        = "ipynb-nv"
+version     = "0.0.1"
+description = "The Jupyter notebook document at nbformat 4.5: cells, outputs, MIME bundles and attachments read from either spelling of a multiline string, checked against the shape rules the format's own schema enforces, and written back with sorted keys, one-space indentation and a trailing newline — the byte-for-byte shape nbformat's own writer produces, so a notebook saved by this package diffs line by line in git.  Interface only — every body is a todo()."
+license     = "Apache-2.0"
+
+# An INTERFACE release: every `pub fn` body is a `todo()`, so the
+# signatures and the effect rows are published and nothing is
+# implemented.  `novo pkg publish` recognises the shape and requires
+# both the draft stability and the 0.0.x version; the first
+# implementation is the 0.1.0 published over it.
+stability   = "draft"
+
+# `core`: a document read out of text the caller already holds and
+# written back into text it takes away.  Every public function declares
+# `[]`, and the two places an effect would have been natural are
+# refused rather than smuggled in.  Nothing opens the `.ipynb` file —
+# a caller reads it and hands over the string — and nothing EXECUTES a
+# cell, which would be a process, a socket and a kernel protocol.
+#
+# The one field that would have wanted a clock is a cell identifier.
+# nbformat 4.5 requires every cell to carry one, and generating a fresh
+# one needs randomness; `nbcell.cell_id` therefore takes the
+# identifier as a parameter and `nbvalidate` checks it, so the `[rand]`
+# is spent in the caller where it is visible.
+#
+# NO `tests/embedded_probe.nv`, and the absence is a claim not made
+# rather than a claim skipped.  A notebook is a tree of strings and
+# `std.json` values, and `std.json` refuses the embedded tier outright.
+layer       = "core"
+
+category    = "data"
+
+tags        = ["ipynb", "jupyter", "notebook", "nbformat", "json", "mime", "sans-io"]
+repository  = "https://github.com/novolang/ipynb-nv"
+maintainers = ["novo-lang"]
+novo        = ">= 0.9.0"
+
+# A library: no `main`, so `novo pkg build` type-checks and
+# effect-checks every module under `src/` and writes no binary.
+
+[docs.pages]
+"README.md" = "The Jupyter notebook document, read, checked and written back"
+
+[dependencies]
+# None, and the absence worth saying out loud is a JSON package.
+#
+# A notebook IS a JSON document, and the parts of it the format leaves
+# open — a notebook's metadata, a cell's metadata, the payload under
+# `application/json` in an output — are arbitrary JSON.  They are
+# carried as `std.json`'s own values, which are in the standard library
+# and in every consumer's assembly already.  A JSON model declared here
+# would collide with the one a caller already has, and a notebook tool
+# reading `kernelspec.name` out of a notebook's metadata would have had
+# to learn a second one.

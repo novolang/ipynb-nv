@@ -1,0 +1,166 @@
+// nbvalidate — the shape rules the format's own schema enforces, as a
+// list of complaints rather than a yes or a no.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT IT CHECKS.  nbformat ships a JSON Schema per version, and
+// `nbformat.validate` runs a document against it.  This module is that
+// check, written as the rules themselves rather than as a schema
+// interpreter — there is no JSON Schema engine in this package's
+// dependencies and there is not going to be one, because a schema
+// engine would report a notebook's problems in the schema's vocabulary
+// (`"is not valid under any of the given schemas"`) and a person fixing
+// a notebook needs them in the notebook's.
+//
+// EVERY ISSUE, NOT THE FIRST.  A person handed one complaint fixes it,
+// runs the tool again and is handed the next; a person handed all of
+// them fixes the file once.  `check` therefore walks the whole document,
+// and `first_issue` is there for the caller that only wants to know
+// whether there is one.
+//
+// THE RULES ARE VERSION-DEPENDENT, and only slightly: the cell
+// identifier is required at 4.5 and does not exist below it.  Every
+// check takes the notebook's own version from the notebook, so a 4.4
+// document is not told off for a member 4.5 invented.
+
+// One thing the format does not allow, and where.
+pub struct NbIssue
+    // The JSON Pointer of the member at fault: `"/cells/2/id"`.
+    path: Str
+    // The rule that objected, as the fault it would be if the reading
+    // were strict.
+    fault: NbFault
+    // Whether a writer can produce a file at all with this issue
+    // present.  A cell with no identifier in a 4.5 notebook is
+    // blocking; a stream output whose `name` is neither `"stdout"` nor
+    // `"stderr"` is not, because the member is written back as it was.
+    blocking: Bool
+
+// Every rule the notebook breaks, in document order.
+//
+// An empty list is a notebook nbformat's own validator accepts.
+//
+// ```novo
+// use nbnotebook
+// use nbvalidate
+//
+// fn main() [io]
+//     println("${list.len(nbvalidate.check(nbnotebook.notebook()))}")   // 0
+// ```
+pub fn check(nb: NbNotebook) -> [NbIssue] []
+    todo("ipynb-nv.nbvalidate.check")
+
+// The same, against a stated format version rather than the notebook's
+// own.
+//
+// What a caller about to call `nbwrite.write_at` asks first.
+pub fn check_at(nb: NbNotebook, major: Int, minor: Int) -> [NbIssue] []
+    todo("ipynb-nv.nbvalidate.check_at")
+
+// The first rule the notebook breaks, or `None`.
+//
+// ```novo
+// use nbnotebook
+// use nbvalidate
+//
+// fn main() [io]
+//     match nbvalidate.first_issue(nbnotebook.notebook())
+//         Some(i) => println("${i.path}: ${i.fault.message()}")
+//         None    => println("this notebook satisfies its own version")
+// ```
+pub fn first_issue(nb: NbNotebook) -> ?NbIssue []
+    todo("ipynb-nv.nbvalidate.first_issue")
+
+// Whether the notebook satisfies its own version's rules.
+//
+// ```novo
+// use nbnotebook
+// use nbvalidate
+//
+// fn main() [io]
+//     println("${nbvalidate.is_valid(nbnotebook.notebook())}")   // true
+// ```
+pub fn is_valid(nb: NbNotebook) -> Bool []
+    todo("ipynb-nv.nbvalidate.is_valid")
+
+// Only the issues that stop the notebook being written.
+//
+// The set `nbwrite.write` refuses over.  A tool offering to save asks
+// this and a tool offering to lint asks `check`.
+pub fn blocking_issues(nb: NbNotebook) -> [NbIssue] []
+    todo("ipynb-nv.nbvalidate.blocking_issues")
+
+// Every rule one cell breaks, with the paths rooted at that cell.
+//
+// For an editor checking a cell as it is edited, where the cell's
+// position in the notebook is not yet settled.
+//
+// ```novo
+// use nbcell
+// use nbvalidate
+//
+// fn main() [io]
+//     let issues = nbvalidate.check_cell(nbcell.code_cell("a1", "print(1)"), 4, 5)
+//     println("${list.len(issues)}")   // 0
+// ```
+pub fn check_cell(c: NbCell, major: Int, minor: Int) -> [NbIssue] []
+    todo("ipynb-nv.nbvalidate.check_cell")
+
+// Every rule one output breaks.
+pub fn check_output(o: NbOutput, major: Int, minor: Int) -> [NbIssue] []
+    todo("ipynb-nv.nbvalidate.check_output")
+
+// Every rule one MIME bundle breaks: a payload that is not the shape
+// its MIME type requires, and base64 text that is not base64.
+//
+// The check that costs the most, because it decodes every binary
+// payload to find out, which is why it is separable and why `check`
+// says in its own documentation that it performs it.
+pub fn check_bundle(b: NbMimeBundle) -> [NbIssue] []
+    todo("ipynb-nv.nbvalidate.check_bundle")
+
+// A one-line report of an issue, for a linter's output.
+//
+// The path, a colon and the fault's own sentence:
+// `"/cells/2/id: a cell identifier is required at nbformat 4.5"`.
+//
+// ```novo
+// use nbcell
+// use nbvalidate
+//
+// fn main() [io]
+//     match nbvalidate.first_issue_of_cell(nbcell.code_cell("", "x"), 4, 5)
+//         Some(i) => println(nbvalidate.issue_text(i))
+//         None    => println("no issue")
+// ```
+pub fn issue_text(i: NbIssue) -> Str []
+    todo("ipynb-nv.nbvalidate.issue_text")
+
+// The first rule one cell breaks, or `None`.
+pub fn first_issue_of_cell(c: NbCell, major: Int, minor: Int) -> ?NbIssue []
+    todo("ipynb-nv.nbvalidate.first_issue_of_cell")
+
+// Which members a cell of this kind may carry, at this version.
+//
+// The rule behind `NbForbiddenMember`, exposed: a markdown cell may
+// have `attachments` and may not have `outputs` or `execution_count`,
+// a raw cell may have neither, and a code cell must have both.  A
+// caller building a cell by hand checks against this rather than
+// discovering it from a validator.
+//
+// ```novo
+// use nbvalidate
+//
+// fn main() [io]
+//     println("${list.len(nbvalidate.allowed_members(NbMarkdown, 4, 5))}")
+// ```
+pub fn allowed_members(kind: NbCellKind, major: Int, minor: Int) -> [Str] []
+    todo("ipynb-nv.nbvalidate.allowed_members")
+
+// Which members a cell of this kind must carry, at this version.
+//
+// `"cell_type"`, `"source"` and `"metadata"` always; `"id"` from 4.5;
+// `"outputs"` and `"execution_count"` on a code cell.
+pub fn required_members(kind: NbCellKind, major: Int, minor: Int) -> [Str] []
+    todo("ipynb-nv.nbvalidate.required_members")

@@ -1,0 +1,122 @@
+// nberror — every refusal, and the one sentence each of them renders
+// to.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// TWO KINDS OF WRONG, AND THEY ARE NOT THE SAME KIND.  A notebook can
+// fail to be JSON at all, and it can be JSON of the wrong shape.  The
+// first is fatal: there is no document, and `nbread.read` answers an
+// `NbFault`.  The second is not: a notebook whose third cell is missing
+// its identifier is still a notebook a tool can show, and refusing to
+// open it would be worse than opening it — which is why the shape rules
+// are a LIST OF ISSUES from `nbvalidate` rather than an error from the
+// reader.  `nbread.read_strict` is for the caller that wants the second
+// kind fatal too.
+//
+// The two are one taxonomy, because a caller that funnels both into one
+// log writes one match, and because `nbread.read_strict` turns an issue
+// into a fault and needs somewhere to put it.
+
+// What made a notebook unreadable, or what a shape rule objected to.
+//
+// `path` on the shape faults is the JSON Pointer of the member at
+// fault — `"/cells/2/id"` — because a message that named only the rule
+// would leave a user of a two-hundred-cell notebook to find it.
+pub enum NbFault
+    // The text is not JSON.
+    NbNotJson(at: Int)
+    // The top-level value is not a JSON object.
+    NbNotAnObject
+    // `nbformat` is missing, or is not an integer.
+    NbNoFormatVersion
+    // `nbformat` names a major version this package does not read.
+    // Only 4 is read; 1, 2 and 3 are different documents and are named
+    // in the README as not included.
+    NbUnsupportedFormat(major: Int, minor: Int)
+    // A required member is absent.  `path` is its JSON Pointer.
+    NbMissingMember(path: Str, member: Str)
+    // A member is present with a type the format does not allow there.
+    NbWrongMemberType(path: Str, want: Str, saw: Str)
+    // `cell_type` names something other than `"code"`, `"markdown"` or
+    // `"raw"`.
+    NbUnknownCellType(path: Str, saw: Str)
+    // `output_type` names something other than `"stream"`,
+    // `"display_data"`, `"execute_result"` or `"error"`.
+    NbUnknownOutputType(path: Str, saw: Str)
+    // A cell identifier that breaks the 4.5 rule: one to sixty-four
+    // characters from the set of letters, digits, `-` and `_`.
+    NbBadCellId(path: Str, saw: Str)
+    // Two cells carry the same identifier.  nbformat 4.5 requires them
+    // to be unique within a notebook.
+    NbDuplicateCellId(path: Str, id: Str)
+    // A member the format says a cell of this kind may not have — an
+    // `outputs` on a markdown cell, an `execution_count` on a raw one.
+    NbForbiddenMember(path: Str, member: Str)
+    // A MIME bundle member whose payload is not the shape its MIME type
+    // requires: a `text/plain` that is not a multiline string, an
+    // `image/png` that is not base64 text.
+    NbBadMimePayload(path: Str, mime: Str)
+    // An `image/png` or other binary MIME payload whose text is not
+    // base64.
+    NbBadBase64(path: Str, mime: Str)
+    // An attachment name that is empty, or a bundle under it that is
+    // not an object.
+    NbBadAttachment(path: Str, name: Str)
+    // `execution_count` is neither null nor a non-negative integer.
+    NbBadExecutionCount(path: Str)
+    // A notebook that would be written at a format version whose rules
+    // it does not satisfy — a 4.5 notebook whose cells have no
+    // identifiers.
+    NbNotWritableAt(major: Int, minor: Int, why: Str)
+
+// The standard `Error` implementation, so a bad notebook can be
+// reported by anything that reports errors.
+impl Error for NbFault
+    // Answer the one-line report: what was wrong, and where in the
+    // document.
+    fn message(self) -> Str
+        todo("ipynb-nv.nberror.NbFault.message")
+
+// The JSON Pointer of the member at fault, or `""` for the faults that
+// are about the document as a whole.
+//
+// ```novo
+// use nberror
+//
+// fn main() [io]
+//     println(nberror.path_of(NbMissingMember("/cells/2", "id")))   // /cells/2
+// ```
+pub fn path_of(f: NbFault) -> Str []
+    todo("ipynb-nv.nberror.path_of")
+
+// A short, stable name for the fault, for a metric label or a test.
+//
+// The variant's own spelling with the `Nb` prefix removed and the words
+// separated by hyphens: `"not-json"`, `"bad-cell-id"`,
+// `"duplicate-cell-id"`.
+//
+// ```novo
+// use nberror
+//
+// fn main() [io]
+//     println(nberror.code_of(NbNotAnObject))   // not-an-object
+// ```
+pub fn code_of(f: NbFault) -> Str []
+    todo("ipynb-nv.nberror.code_of")
+
+// Whether the fault stops the notebook being read at all.
+//
+// True for `NbNotJson`, `NbNotAnObject`, `NbNoFormatVersion` and
+// `NbUnsupportedFormat` — the four that mean there is no document.
+// False for the shape faults, which `nbread.read` reports as issues on
+// a notebook it still hands back.
+//
+// ```novo
+// use nberror
+//
+// fn main() [io]
+//     println("${nberror.is_fatal(NbNotJson(0))}")   // true
+// ```
+pub fn is_fatal(f: NbFault) -> Bool []
+    todo("ipynb-nv.nberror.is_fatal")

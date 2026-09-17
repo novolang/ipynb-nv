@@ -1,0 +1,234 @@
+// nbnotebook — the document itself: a format version, a metadata
+// object, and an ordered list of cells.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// WHAT A NOTEBOOK IS.  A `.ipynb` file is a single JSON object with
+// four members: `nbformat` and `nbformat_minor`, which are the major
+// and minor version of the format; `metadata`, which is where the
+// kernel and the language are named and where every tool keeps its own
+// keys; and `cells`, an array.  Everything else a reader has heard of —
+// the kernel, the execution, the widgets, the outputs' rendering — is
+// somewhere inside those four.
+//
+// THE VERSION IS CARRIED, NOT ASSUMED.  A notebook read at 4.4 keeps
+// `4` and `4`, and writing it back writes 4.4 — so a file this package
+// opens and saves does not silently acquire a newer format version and
+// a diff nobody asked for.  `upgraded` is the deliberate call that
+// changes it, and it is separate because moving to 4.5 means giving
+// every cell an identifier, which needs randomness the caller has to
+// supply.
+//
+// THE CELLS ARE A LIST.  Order is the document — a notebook is read top
+// to bottom — and the identifiers 4.5 added are for matching cells
+// across a save, not for addressing them.  `cell_by_id` exists for the
+// caller that has one.
+
+// A notebook.
+pub struct NbNotebook
+    // The major format version.  `4` for everything this package reads.
+    major: Int
+    // The minor format version.  `5` is the one that requires cell
+    // identifiers; `0` to `4` do not have the member at all.
+    minor: Int
+    // The notebook's metadata: arbitrary JSON.  `kernelspec` and
+    // `language_info` live here, and so does every key a tool adds.
+    metadata: JsonValueH
+    // The cells, in the order the file has them.
+    cells: [NbCell]
+
+// An empty notebook at nbformat 4.5, with an empty metadata object and
+// no cells.
+//
+// ```novo
+// use nbnotebook
+//
+// fn main() [io]
+//     let nb = nbnotebook.notebook()
+//     println("${nb.major}.${nb.minor}")   // 4.5
+// ```
+pub fn notebook() -> NbNotebook []
+    todo("ipynb-nv.nbnotebook.notebook")
+
+// An empty notebook at a stated format version.
+//
+// `NbUnsupportedFormat` for a major version other than 4, because this
+// package reads one format and saying so is better than writing a
+// document nothing can open.
+//
+// ```novo
+// use nbnotebook
+//
+// fn main() [io]
+//     match nbnotebook.notebook_at(3, 0)
+//         Ok(_)  => println("this cannot happen")
+//         Err(e) => println(e.message())
+// ```
+pub fn notebook_at(major: Int, minor: Int) -> Result<NbNotebook, NbFault> []
+    todo("ipynb-nv.nbnotebook.notebook_at")
+
+// How many cells the notebook has.
+pub fn cell_count(nb: NbNotebook) -> Int []
+    todo("ipynb-nv.nbnotebook.cell_count")
+
+// The cell at a position, or `None`.
+pub fn cell_at(nb: NbNotebook, index: Int) -> ?NbCell []
+    todo("ipynb-nv.nbnotebook.cell_at")
+
+// The cell with an identifier, or `None`.
+//
+// The lookup nbformat 4.5's identifiers exist for: a comment attached
+// to a cell, a diff matching cells across a save, and a link to one all
+// need a name that survives an insertion above it.
+//
+// ```novo
+// use nbnotebook
+//
+// fn main() [io]
+//     match nbnotebook.cell_by_id(nbnotebook.notebook(), "a1b2")
+//         Some(_) => println("found")
+//         None    => println("no cell with that id")
+// ```
+pub fn cell_by_id(nb: NbNotebook, id: Str) -> ?NbCell []
+    todo("ipynb-nv.nbnotebook.cell_by_id")
+
+// The position of the cell with an identifier, or `None`.
+pub fn index_of(nb: NbNotebook, id: Str) -> ?Int []
+    todo("ipynb-nv.nbnotebook.index_of")
+
+// `nb` with one more cell at the end.
+//
+// ```novo
+// use nbcell
+// use nbnotebook
+//
+// fn main() [io]
+//     let nb = nbnotebook.append(nbnotebook.notebook(),
+//                                nbcell.code_cell("a1", "print(1)"))
+//     println("${nbnotebook.cell_count(nb)}")   // 1
+// ```
+pub fn append(nb: NbNotebook, c: NbCell) -> NbNotebook []
+    todo("ipynb-nv.nbnotebook.append")
+
+// `nb` with a cell inserted at a position, and the rest moved down.
+//
+// A position past the end appends; a negative one inserts at the front.
+pub fn insert(nb: NbNotebook, index: Int, c: NbCell) -> NbNotebook []
+    todo("ipynb-nv.nbnotebook.insert")
+
+// `nb` with the cell at a position replaced.
+pub fn replace_at(nb: NbNotebook, index: Int, c: NbCell) -> NbNotebook []
+    todo("ipynb-nv.nbnotebook.replace_at")
+
+// `nb` without the cell at a position.
+pub fn remove_at(nb: NbNotebook, index: Int) -> NbNotebook []
+    todo("ipynb-nv.nbnotebook.remove_at")
+
+// `nb` with its cells replaced.
+pub fn with_cells(nb: NbNotebook, cells: [NbCell]) -> NbNotebook []
+    todo("ipynb-nv.nbnotebook.with_cells")
+
+// `nb` with a different metadata object.
+pub fn with_metadata(nb: NbNotebook, metadata: JsonValueH) -> NbNotebook []
+    todo("ipynb-nv.nbnotebook.with_metadata")
+
+// The name under `metadata.kernelspec.name`, or `""`.
+//
+// The one metadata member a tool almost always wants, and the one whose
+// absence changes what a tool can do: a notebook with no kernelspec has
+// no language, so a renderer highlighting its code cells has nothing to
+// highlight them as.
+//
+// ```novo
+// use nbnotebook
+//
+// fn main() [io]
+//     println(nbnotebook.kernel_name(nbnotebook.notebook()))   // (empty)
+// ```
+pub fn kernel_name(nb: NbNotebook) -> Str []
+    todo("ipynb-nv.nbnotebook.kernel_name")
+
+// The name under `metadata.language_info.name`, or `""`.
+pub fn language_name(nb: NbNotebook) -> Str []
+    todo("ipynb-nv.nbnotebook.language_name")
+
+// `nb` with every code cell's outputs and execution count gone.
+//
+// "Clear all outputs", over the whole document.  What a repository that
+// reviews notebooks runs before a commit, and the reason it is here
+// rather than left to a caller's own walk: the execution counts have to
+// go too, and a walk that cleared the outputs and left the counts
+// produces a notebook nbformat calls valid and a reader finds confusing.
+//
+// ```novo
+// use nbnotebook
+//
+// fn main() [io]
+//     println("${nbnotebook.cell_count(nbnotebook.cleared(nbnotebook.notebook()))}")
+// ```
+pub fn cleared(nb: NbNotebook) -> NbNotebook []
+    todo("ipynb-nv.nbnotebook.cleared")
+
+// `nb` at nbformat 4.5, with the identifiers a caller supplies given to
+// the cells that have none.
+//
+// THE DELIBERATE VERSION CHANGE.  Moving a notebook from 4.4 to 4.5
+// means every cell acquires an identifier, and an identifier is random.
+// This package may not read a random source, so the caller generates as
+// many as `cells_without_id` says it needs and hands them over in that
+// order.
+//
+// `NbNotWritableAt` when there are too few.
+//
+// ```novo
+// use nbnotebook
+//
+// fn main() [io]
+//     match nbnotebook.upgraded(nbnotebook.notebook(), [])
+//         Ok(nb) => println("${nb.minor}")   // 5
+//         Err(e) => println(e.message())
+// ```
+pub fn upgraded(nb: NbNotebook, fresh_ids: [Str]) -> Result<NbNotebook, NbFault> []
+    todo("ipynb-nv.nbnotebook.upgraded")
+
+// How many cells carry no identifier.
+//
+// How many identifiers `upgraded` will want.
+pub fn cells_without_id(nb: NbNotebook) -> Int []
+    todo("ipynb-nv.nbnotebook.cells_without_id")
+
+// Every cell identifier that appears more than once, each named once.
+//
+// nbformat 4.5 requires them to be unique, and a notebook that broke
+// the rule is one a tool has to be told about rather than one it should
+// refuse to open.
+pub fn duplicate_ids(nb: NbNotebook) -> [Str] []
+    todo("ipynb-nv.nbnotebook.duplicate_ids")
+
+// Every cell of one kind, in document order.
+//
+// ```novo
+// use nbnotebook
+//
+// fn main() [io]
+//     println("${list.len(nbnotebook.cells_of_kind(nbnotebook.notebook(), NbCode))}")
+// ```
+pub fn cells_of_kind(nb: NbNotebook, kind: NbCellKind) -> [NbCell] []
+    todo("ipynb-nv.nbnotebook.cells_of_kind")
+
+// The source of every code cell, joined with a blank line between them.
+//
+// What "export the notebook as a script" is, minus the comment headers
+// a converter adds.  Here because the alternative is that every
+// consumer writes the same walk, and because a walk that included
+// markdown cells would produce text that is not the language's.
+//
+// ```novo
+// use nbnotebook
+//
+// fn main() [io]
+//     println(nbnotebook.code_source(nbnotebook.notebook()))   // (empty)
+// ```
+pub fn code_source(nb: NbNotebook) -> Str []
+    todo("ipynb-nv.nbnotebook.code_source")

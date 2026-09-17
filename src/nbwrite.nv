@@ -1,0 +1,168 @@
+// nbwrite — a notebook back to JSON text.
+//
+// Every body is a `todo()`.  The signatures are the design, and the
+// compiler checks them as claims; see the README for the stamp.
+//
+// THE OUTPUT IS BYTE-DEFINED, AND THAT IS THE POINT OF THIS MODULE.
+// A `.ipynb` file lives in a version-controlled repository beside the
+// code it documents, and a writer that chose its own JSON style would
+// make every save a diff over the whole file.  nbformat's own writer
+// fixes four things, and this one reproduces all four:
+//
+//   1. the members of every object are written in SORTED key order;
+//   2. the indentation is ONE space per level;
+//   3. a multiline string — a `source`, a stream's `text`, a text MIME
+//      payload — is written as an ARRAY OF LINES, each keeping its own
+//      `\n`;
+//   4. the file ends with a newline.
+//
+// The third is what makes a notebook diff by the line rather than by
+// the cell, and the first two are what make two tools agree on the
+// bytes.  Together they mean a notebook this package writes is the file
+// Jupyter would have written, so a repository does not learn which tool
+// touched it last.
+//
+// WHAT IS NOT REPRODUCED, and it is worth naming.  A notebook whose
+// members were NOT in sorted order, or which was saved with a different
+// indentation, does not come back byte for byte — it comes back
+// canonical.  That is a deliberate one-way normalisation: the
+// alternative is carrying the original spelling through the document,
+// which every consumer would then have to preserve.  `read` then
+// `write` is therefore idempotent from the second write onwards, and
+// `is_canonical` is how a caller finds out whether the first one will
+// change anything.
+
+// The notebook as the JSON text of a `.ipynb` file.
+//
+// Sorted keys, one-space indentation, lines split, trailing newline.
+//
+// `NbNotWritableAt` when the notebook does not satisfy the rules of the
+// version it carries — a 4.5 notebook with a cell that has no
+// identifier is the case that happens — because writing it would
+// produce a file that claims a version it does not meet.
+// `nbvalidate.check` answers the same question with every reason
+// instead of the first.
+//
+// ```novo
+// use nbnotebook
+// use nbwrite
+//
+// fn main() [io]
+//     match nbwrite.write(nbnotebook.notebook())
+//         Ok(t)  => println(t)
+//         Err(e) => println(e.message())
+// ```
+pub fn write(nb: NbNotebook) -> Result<Str, NbFault> []
+    todo("ipynb-nv.nbwrite.write")
+
+// The same, at a stated format version rather than the notebook's own.
+//
+// `NbNotWritableAt` when the notebook does not satisfy that version's
+// rules, and `NbUnsupportedFormat` for a major version other than 4.
+// Saving a 4.5 notebook as 4.4 is the case this is for, and it drops
+// the cell identifiers rather than writing members the older version
+// does not define.
+//
+// ```novo
+// use nbnotebook
+// use nbwrite
+//
+// fn main() [io]
+//     match nbwrite.write_at(nbnotebook.notebook(), 4, 4)
+//         Ok(_)  => println("written as 4.4, without the cell ids")
+//         Err(e) => println(e.message())
+// ```
+pub fn write_at(nb: NbNotebook, major: Int, minor: Int) -> Result<Str, NbFault> []
+    todo("ipynb-nv.nbwrite.write_at")
+
+// The notebook as a JSON value, before it is rendered to text.
+//
+// For the caller that is going to put the notebook into a JSON API
+// rather than into a file, and for a test that wants to compare
+// structures rather than strings.  The key order is not carried by a
+// JSON value, so a caller that needs the canonical bytes uses `write`.
+pub fn to_json(nb: NbNotebook) -> Result<JsonValueH, NbFault> []
+    todo("ipynb-nv.nbwrite.to_json")
+
+// One cell as the JSON text of its object, indented as it would be
+// inside a notebook.
+//
+// What a diff tool shows for one cell, and what a test asserts against.
+//
+// ```novo
+// use nbcell
+// use nbwrite
+//
+// fn main() [io]
+//     match nbwrite.write_cell(nbcell.code_cell("a1", "print(1)"))
+//         Ok(t)  => println(t)
+//         Err(e) => println(e.message())
+// ```
+pub fn write_cell(c: NbCell) -> Result<Str, NbFault> []
+    todo("ipynb-nv.nbwrite.write_cell")
+
+// Whether the text is already what `write` would produce.
+//
+// The question a repository hook asks: a notebook that answers true
+// needs no rewrite, and one that answers false will produce a diff the
+// first time it is saved whatever else changed.
+//
+// ```novo
+// use nbwrite
+//
+// fn main() [io]
+//     println("${nbwrite.is_canonical("{}")}")   // false
+// ```
+pub fn is_canonical(text: Str) -> Bool []
+    todo("ipynb-nv.nbwrite.is_canonical")
+
+// The text rewritten in canonical form, with everything else left
+// alone.
+//
+// `read` then `write`, named because it is what a repository hook and a
+// `--fix` flag actually do, and because doing it in one call means a
+// caller cannot accidentally drop the issues the reading found.
+//
+// ```novo
+// use nbwrite
+//
+// fn main() [io]
+//     match nbwrite.canonicalise("{\"nbformat\":4,\"nbformat_minor\":5,\"cells\":[]}")
+//         Ok(t)  => println(t)
+//         Err(e) => println(e.message())
+// ```
+pub fn canonicalise(text: Str) -> Result<Str, NbFault> []
+    todo("ipynb-nv.nbwrite.canonicalise")
+
+// The order in which the members of a notebook, a cell or an output are
+// written.
+//
+// Sorted, which is what nbformat's writer does and what makes two tools
+// agree.  Exposed because a caller writing its own renderer of a
+// notebook fragment — a diff, a fixture — needs to write the same order
+// this does, and because a reader of this package should be able to
+// check the claim rather than take it.
+//
+// ```novo
+// use nbwrite
+//
+// fn main() [io]
+//     println("${list.len(nbwrite.member_order(["cells", "nbformat"]))}")   // 2
+// ```
+pub fn member_order(members: [Str]) -> [Str] []
+    todo("ipynb-nv.nbwrite.member_order")
+
+// How many spaces one level of indentation costs.
+//
+// One, which is nbformat's own choice and is not configurable here: a
+// writer with an option would produce two file shapes, and the whole
+// value of a canonical form is that there is one.
+//
+// ```novo
+// use nbwrite
+//
+// fn main() [io]
+//     println("${nbwrite.indent_width()}")   // 1
+// ```
+pub fn indent_width() -> Int []
+    todo("ipynb-nv.nbwrite.indent_width")
