@@ -1,19 +1,12 @@
 // ipynb_tests.nv — the API suite, written against the signatures.
 //
-// RED ON PURPOSE: every body under `src/` is a `todo()`, so every
-// assertion here reaches `not implemented: ipynb-nv.<module>.<fn>`.
-// That is the expected state of an interface release: the compiler has
-// checked every signature, every type and every effect row, and nothing
-// else has been checked because there is nothing else yet.
-//
 // THE ORACLE IS NBFORMAT'S OWN SUITE.  The nbformat package ships a
 // `tests/` directory of `.ipynb` files — `test4.ipynb`,
 // `test4plus.ipynb`, `invalid.ipynb`, `no-min-version.ipynb` and the
 // rest — each of which its `validate` accepts or rejects, and a
 // round-trip test that reads a file, writes it and compares the bytes.
 // The cases below are those files reduced to the smallest document that
-// shows the same rule, and the whole directory becomes a generated run
-// beside this one when the implementation lands.
+// shows the same rule.
 
 use std.test
 use std.list
@@ -77,7 +70,7 @@ fn test_text_that_is_not_json_is_the_one_fault_with_an_offset()
         Ok(_)  => test.fail("nbformat is required")
         Err(e) => test.assert_eq(nberror.code_of(e), "no-format-version")
     test.assert(nbread.is_notebook(empty45()))
-    test.assert(nbread.is_notebook("{}") == false)
+    test.assert(not nbread.is_notebook("{}"))
 
 @test
 fn test_the_version_is_readable_without_reading_the_cells()
@@ -206,8 +199,8 @@ fn test_the_three_cell_kinds_and_their_names()
 fn test_the_cell_id_rule_is_the_one_4_5_added()
     // One to sixty-four characters of letters, digits, `-` and `_`.
     test.assert(nbcell.is_valid_cell_id("a1b2-c3_d4"))
-    test.assert(nbcell.is_valid_cell_id("") == false)
-    test.assert(nbcell.is_valid_cell_id("has a space") == false)
+    test.assert(not nbcell.is_valid_cell_id(""))
+    test.assert(not nbcell.is_valid_cell_id("has a space"))
     let c = nbcell.cell_id(nbcell.code_cell("", "print(1)"), "f00d")
     test.assert_eq(c.id, "f00d")
 
@@ -291,9 +284,9 @@ fn test_which_mime_types_are_written_as_base64()
     // `+json`-suffixed types.
     test.assert(nbcell.is_base64_mime("image/png"))
     test.assert(nbcell.is_base64_mime("application/pdf"))
-    test.assert(nbcell.is_base64_mime("text/plain") == false)
-    test.assert(nbcell.is_base64_mime("application/json") == false)
-    test.assert(nbcell.is_base64_mime("application/geo+json") == false)
+    test.assert(not nbcell.is_base64_mime("text/plain"))
+    test.assert(not nbcell.is_base64_mime("application/json"))
+    test.assert(not nbcell.is_base64_mime("application/geo+json"))
     match nbcell.bundle_bytes(nbcell.bundle(), "image/png")
         Some(_) => test.fail("an empty bundle has no image")
         None    => test.assert(true)
@@ -432,7 +425,7 @@ fn test_a_read_and_a_write_agree_from_the_second_write_onwards()
                 Ok(t2)  => test.assert_eq(t2, t)
     // A notebook written by hand, with its members in the file's own
     // order, is not canonical and will produce a diff when it is saved.
-    test.assert(nbwrite.is_canonical("{\"nbformat\":4}") == false)
+    test.assert(not nbwrite.is_canonical("{\"nbformat\":4}"))
 
 @test
 fn test_the_member_order_is_sorted_and_is_not_configurable()
@@ -510,14 +503,14 @@ fn test_which_members_a_cell_kind_may_and_must_carry()
     // building a cell by hand checks rather than discovers.
     let md = nbvalidate.allowed_members(NbMarkdown, 4, 5)
     test.assert(list.contains(md, "attachments"))
-    test.assert(list.contains(md, "outputs") == false)
-    test.assert(list.contains(nbvalidate.allowed_members(NbRaw, 4, 5),
-                              "execution_count") == false)
+    test.assert(not list.contains(md, "outputs"))
+    test.assert(not list.contains(nbvalidate.allowed_members(NbRaw, 4, 5),
+                                  "execution_count"))
     let req = nbvalidate.required_members(NbCode, 4, 5)
     test.assert(list.contains(req, "id"))
     test.assert(list.contains(req, "outputs"))
-    test.assert(list.contains(nbvalidate.required_members(NbCode, 4, 4),
-                              "id") == false)
+    test.assert(not list.contains(nbvalidate.required_members(NbCode, 4, 4),
+                                  "id"))
 
 @test
 fn test_an_output_and_a_bundle_are_checked_on_their_own()
@@ -526,7 +519,7 @@ fn test_an_output_and_a_bundle_are_checked_on_their_own()
     // blocking: the member is written back as it was.
     let odd = nbvalidate.check_output(NbStream("stdlog", "x"), 4, 5)
     test.assert_eq(list.len(odd), 1)
-    test.assert(list.get(odd, 0).blocking == false)
+    test.assert(not list.get(odd, 0).blocking)
     test.assert_eq(list.len(nbvalidate.check_bundle(nbcell.bundle())), 0)
     // An `image/png` whose text is not base64 is a malformed file.
     let bad = nbcell.bundle_with(nbcell.bundle(), "image/png", json.string("!!!"))

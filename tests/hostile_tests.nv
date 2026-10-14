@@ -1,0 +1,16 @@
+// hostile_tests.nv — metadata nested far deeper than a notebook has.
+
+use std.test
+use nbread
+use nbwrite
+
+@test
+fn test_deeply_nested_metadata_reads_and_writes() [io]
+    let deep = "[".repeat(20000) + "]".repeat(20000)
+    let text = "{\"nbformat\": 4, \"nbformat_minor\": 5, \"metadata\": {\"x\": " + deep + "}, \"cells\": []}"
+    match nbread.read(text)
+        Err(_) => test.assert(true)
+        Ok(r)  =>
+            match nbwrite.write(r.notebook)
+                Err(_)  => test.assert(true)
+                Ok(out) => test.assert(out != "")

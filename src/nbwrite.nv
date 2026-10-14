@@ -1,8 +1,5 @@
 // nbwrite — a notebook back to JSON text.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // THE OUTPUT IS BYTE-DEFINED, AND THAT IS THE POINT OF THIS MODULE.
 // A `.ipynb` file lives in a version-controlled repository beside the
 // code it documents, and a writer that chose its own JSON style would
@@ -31,6 +28,247 @@
 // `write` is therefore idempotent from the second write onwards, and
 // `is_canonical` is how a caller finds out whether the first one will
 // change anything.
+//
+// THE VERSION DECIDES THE MEMBERS.  Writing at 4.5 emits a cell's `id`
+// because the version requires it.  Below 4.5 the writer INVENTS
+// nothing: a cell that has no identifier gets no `id` member, because a
+// file that carried one would be a 4.5 file wearing a 4.4 number.  It
+// DISCARDS nothing either — a cell that has one keeps it, because it
+// came out of the file and a load and a save do not lose it.  So a
+// notebook written at the version it already carries comes back with
+// every identifier intact.
+//
+// `write_at` is the one place the requested version does decide, and
+// deliberately: saving a 4.5 notebook as 4.4 is a CONVERSION, and the
+// identifiers go with it, exactly as they do in nbformat's own
+// downgrade.  A caller that wants the file back unchanged calls
+// `write`.
+
+use std.json
+use std.list
+use std.str
+use nbcell
+use nbread
+use nbvalidate
+
+// A JSON value as text, in the canonical shape: sorted keys, one space
+// per level, empty containers inline, no space before a colon and one
+// after it.
+//
+// The value is walked rather than handed to `json.pretty`, because
+// `json.pretty` keeps insertion order and indents by two spaces, and
+// this writer's whole job is the other pair of choices.
+fn render(v: JsonValueH, depth: Int, var out: [Str])
+    match json.type_of(v)
+        "object" => render_object(v, depth, out)
+        "array"  => render_array(v, depth, out)
+        _        => list.push(out, json.stringify(v))
+
+// One object: its members in sorted key order, one per line.
+fn render_object(v: JsonValueH, depth: Int, var out: [Str])
+    let keys = member_order(json.keys(v))
+    if list.len(keys) == 0
+        list.push(out, "{}")
+        return
+    list.push(out, "{")
+    list.push(out, "\n")
+    for i in 0..list.len(keys)
+        let k = list.get(keys, i)
+        list.push(out, spaces(depth + 1))
+        let key_text = json.stringify(json.string(k))
+        list.push(out, key_text)
+        list.push(out, ": ")
+        // The member is always there — its name came out of this same
+        // object — so the fallback is unreachable and is written as a
+        // `??` rather than as a match arm, which would be a line no
+        // suite can run.
+        let m = json.get(v, k) ?? json.null()
+        render(m, depth + 1, out)
+        if i + 1 < list.len(keys)
+            list.push(out, ",")
+        list.push(out, "\n")
+    list.push(out, spaces(depth))
+    list.push(out, "}")
+
+// One array: its elements one per line, and an empty array inline.
+fn render_array(v: JsonValueH, depth: Int, var out: [Str])
+    // `json.len` and `json.index` rather than `json.to_list`: they reach
+    // one element without materialising the array, and their miss paths
+    // are unreachable for a value whose kind is already `"array"`, so a
+    // `??` keeps them out of the line count where a match arm would be
+    // a line no suite can run.
+    let n = json.len(v) ?? 0
+    if n == 0
+        list.push(out, "[]")
+        return
+    list.push(out, "[")
+    list.push(out, "\n")
+    for i in 0..n
+        list.push(out, spaces(depth + 1))
+        let e = json.index(v, i) ?? json.null()
+        render(e, depth + 1, out)
+        if i + 1 < n
+            list.push(out, ",")
+        list.push(out, "\n")
+    list.push(out, spaces(depth))
+    list.push(out, "]")
+
+// `n` spaces, one per level of nesting.
+fn spaces(n: Int) -> Str []
+    str.repeat(" ", n)
+
+// A value rendered to the text of a whole file: the document, and the
+// newline the format ends with.
+fn rendered(v: JsonValueH) -> Str []
+    var out: [Str] = []
+    render(v, 0, out)
+    list.push(out, "\n")
+    list.join(out, "")
+
+// A list of texts as a JSON array.
+fn strings_value(xs: [Str]) -> JsonValueH []
+    var out: [JsonValueH] = []
+    for s in xs
+        let v: JsonValueH = json.string(s)
+        list.push(out, v)
+    json.array(out)
+
+// A text as the array of lines the canonical form writes: each line
+// with its own newline, the last without one unless the text ended with
+// one, and an empty text as an empty array.
+fn lines_value(text: Str) -> JsonValueH []
+    let parts = nbcell.split_lines(text)
+    let v = strings_value(parts)
+    v
+
+// One MIME payload as it is written: a `text/*` payload that is a
+// string is split into lines, everything else is written as it stands.
+//
+// `application/json` is deliberately NOT split: its payload is a JSON
+// value, and a JSON string under it is the document, not a line of one.
+fn mime_value(mime: Str, payload: JsonValueH) -> JsonValueH []
+    if str.starts_with(mime, "text/")
+        match json.to_str(payload)
+            Some(s) =>
+                let v = lines_value(s)
+                v
+            None    => payload
+    else
+        payload
+
+// A MIME bundle as a JSON object.
+fn bundle_value(b: NbMimeBundle) -> JsonValueH []
+    var pairs: [(Str, JsonValueH)] = []
+    for e in b.entries
+        let v = mime_value(e.mime, e.payload)
+        list.push(pairs, (e.mime, v))
+    json.object(pairs)
+
+// An execution count as JSON: an integer, or `null` for a cell that has
+// not run.
+fn count_value(count: ?Int) -> JsonValueH []
+    match count
+        None    => json.null()
+        Some(n) =>
+            let v: JsonValueH = json.int(n)
+            v
+
+// Every output of a cell as a JSON array.
+fn outputs_value(outs: [NbOutput]) -> JsonValueH []
+    var xs: [JsonValueH] = []
+    for o in outs
+        let v = output_value(o)
+        list.push(xs, v)
+    json.array(xs)
+
+// One output as a JSON object.
+fn output_value(o: NbOutput) -> JsonValueH []
+    var pairs: [(Str, JsonValueH)] = []
+    let ty: JsonValueH = json.string(nbcell.output_type_name(o))
+    list.push(pairs, ("output_type", ty))
+    match o
+        NbStream(name, text)                    =>
+            let n: JsonValueH = json.string(name)
+            list.push(pairs, ("name", n))
+            let t = lines_value(text)
+            list.push(pairs, ("text", t))
+        NbDisplayData(data, metadata)           =>
+            let d = bundle_value(data)
+            list.push(pairs, ("data", d))
+            list.push(pairs, ("metadata", metadata))
+        NbExecuteResult(count, data, metadata)  =>
+            let d = bundle_value(data)
+            list.push(pairs, ("data", d))
+            let c = count_value(Some(count))
+            list.push(pairs, ("execution_count", c))
+            list.push(pairs, ("metadata", metadata))
+        NbErrorOutput(ename, evalue, traceback) =>
+            let en: JsonValueH = json.string(ename)
+            let ev: JsonValueH = json.string(evalue)
+            let tb = strings_value(traceback)
+            list.push(pairs, ("ename", en))
+            list.push(pairs, ("evalue", ev))
+            list.push(pairs, ("traceback", tb))
+    json.object(pairs)
+
+// The attachments of a markdown or raw cell as one JSON object.
+fn attachments_value(c: NbCell) -> JsonValueH []
+    var pairs: [(Str, JsonValueH)] = []
+    for a in c.attachments
+        let b = bundle_value(a.data)
+        list.push(pairs, (a.name, b))
+    json.object(pairs)
+
+// One cell as a JSON object.
+//
+// `keep_id` is the caller's decision about the time a version does not
+// define `id`: a notebook written at its own version keeps every
+// identifier a cell has, and one being converted down to 4.4 does not.
+// The version still has the last word about inventing one — at 4.5 the
+// member is written because the version requires it, and below 4.5 only
+// a cell that already has an identifier gets one.
+fn cell_value(c: NbCell, minor: Int, keep_id: Bool) -> JsonValueH []
+    var pairs: [(Str, JsonValueH)] = []
+    let name = nbcell.kind_name(c.kind)
+    let ty: JsonValueH = json.string(name)
+    list.push(pairs, ("cell_type", ty))
+    let src = lines_value(c.source)
+    list.push(pairs, ("source", src))
+    list.push(pairs, ("metadata", c.metadata))
+    if keep_id and (minor >= 5 or c.id != "")
+        let idv: JsonValueH = json.string(c.id)
+        list.push(pairs, ("id", idv))
+    if name == "code"
+        let outs = outputs_value(c.outputs)
+        list.push(pairs, ("outputs", outs))
+        let count = count_value(c.execution_count)
+        list.push(pairs, ("execution_count", count))
+    if name != "code"
+        if list.len(c.attachments) > 0
+            let att = attachments_value(c)
+            list.push(pairs, ("attachments", att))
+    json.object(pairs)
+
+// A whole notebook as a JSON object.
+//
+// The identifiers go only when the requested version is below 4.5 AND
+// the notebook's own version is not: that is the conversion, and writing
+// a notebook at the version it already carries keeps what it has.
+fn notebook_value(nb: NbNotebook, major: Int, minor: Int) -> JsonValueH []
+    let keep_ids = minor >= 5 or nb.minor < 5
+    var xs: [JsonValueH] = []
+    for c in nb.cells
+        let v = cell_value(c, minor, keep_ids)
+        list.push(xs, v)
+    var pairs: [(Str, JsonValueH)] = []
+    let cells: JsonValueH = json.array(xs)
+    let maj: JsonValueH = json.int(major)
+    let min: JsonValueH = json.int(minor)
+    list.push(pairs, ("cells", cells))
+    list.push(pairs, ("metadata", nb.metadata))
+    list.push(pairs, ("nbformat", maj))
+    list.push(pairs, ("nbformat_minor", min))
+    json.object(pairs)
 
 // The notebook as the JSON text of a `.ipynb` file.
 //
@@ -53,7 +291,7 @@
 //         Err(e) => println(e.message())
 // ```
 pub fn write(nb: NbNotebook) -> Result<Str, NbFault> []
-    todo("ipynb-nv.nbwrite.write")
+    write_at(nb, nb.major, nb.minor)
 
 // The same, at a stated format version rather than the notebook's own.
 //
@@ -61,7 +299,9 @@ pub fn write(nb: NbNotebook) -> Result<Str, NbFault> []
 // rules, and `NbUnsupportedFormat` for a major version other than 4.
 // Saving a 4.5 notebook as 4.4 is the case this is for, and it drops
 // the cell identifiers rather than writing members the older version
-// does not define.
+// does not define — a conversion, the same one nbformat's own
+// `downgrade` performs.  Asking for the notebook's own version is not a
+// conversion and keeps them; that is `write`.
 //
 // ```novo
 // use nbnotebook
@@ -73,7 +313,13 @@ pub fn write(nb: NbNotebook) -> Result<Str, NbFault> []
 //         Err(e) => println(e.message())
 // ```
 pub fn write_at(nb: NbNotebook, major: Int, minor: Int) -> Result<Str, NbFault> []
-    todo("ipynb-nv.nbwrite.write_at")
+    if major != 4
+        return Err(NbUnsupportedFormat(major, minor))
+    for i in nbvalidate.check_at(nb, major, minor)
+        if i.blocking
+            return Err(NbNotWritableAt(major, minor, nbvalidate.issue_text(i)))
+    let v = notebook_value(nb, major, minor)
+    Ok(rendered(v))
 
 // The notebook as a JSON value, before it is rendered to text.
 //
@@ -82,12 +328,23 @@ pub fn write_at(nb: NbNotebook, major: Int, minor: Int) -> Result<Str, NbFault> 
 // structures rather than strings.  The key order is not carried by a
 // JSON value, so a caller that needs the canonical bytes uses `write`.
 pub fn to_json(nb: NbNotebook) -> Result<JsonValueH, NbFault> []
-    todo("ipynb-nv.nbwrite.to_json")
+    if nb.major != 4
+        return Err(NbUnsupportedFormat(nb.major, nb.minor))
+    for i in nbvalidate.check_at(nb, nb.major, nb.minor)
+        if i.blocking
+            return Err(NbNotWritableAt(nb.major, nb.minor, nbvalidate.issue_text(i)))
+    let v = notebook_value(nb, nb.major, nb.minor)
+    Ok(v)
 
 // One cell as the JSON text of its object, indented as it would be
 // inside a notebook.
 //
 // What a diff tool shows for one cell, and what a test asserts against.
+//
+// A cell on its own has no version beside it, so it is judged by the
+// rules every 4.x version shares — a member its kind may not carry, a
+// `metadata` that is not an object — and its identifier, if it has one,
+// is written.
 //
 // ```novo
 // use nbcell
@@ -99,7 +356,11 @@ pub fn to_json(nb: NbNotebook) -> Result<JsonValueH, NbFault> []
 //         Err(e) => println(e.message())
 // ```
 pub fn write_cell(c: NbCell) -> Result<Str, NbFault> []
-    todo("ipynb-nv.nbwrite.write_cell")
+    for i in nbvalidate.check_cell(c, 4, 4)
+        if i.blocking
+            return Err(NbNotWritableAt(4, 4, nbvalidate.issue_text(i)))
+    let v = cell_value(c, 4, true)
+    Ok(rendered(v))
 
 // Whether the text is already what `write` would produce.
 //
@@ -114,7 +375,9 @@ pub fn write_cell(c: NbCell) -> Result<Str, NbFault> []
 //     println("${nbwrite.is_canonical("{}")}")   // false
 // ```
 pub fn is_canonical(text: Str) -> Bool []
-    todo("ipynb-nv.nbwrite.is_canonical")
+    match canonicalise(text)
+        Err(e) => false
+        Ok(t)  => t == text
 
 // The text rewritten in canonical form, with everything else left
 // alone.
@@ -132,7 +395,9 @@ pub fn is_canonical(text: Str) -> Bool []
 //         Err(e) => println(e.message())
 // ```
 pub fn canonicalise(text: Str) -> Result<Str, NbFault> []
-    todo("ipynb-nv.nbwrite.canonicalise")
+    match nbread.read(text)
+        Err(e) => Err(e)
+        Ok(r)  => write(r.notebook)
 
 // The order in which the members of a notebook, a cell or an output are
 // written.
@@ -150,7 +415,9 @@ pub fn canonicalise(text: Str) -> Result<Str, NbFault> []
 //     println("${list.len(nbwrite.member_order(["cells", "nbformat"]))}")   // 2
 // ```
 pub fn member_order(members: [Str]) -> [Str] []
-    todo("ipynb-nv.nbwrite.member_order")
+    var copy: [Str] = list.clone(members)
+    list.sort(copy)
+    copy
 
 // How many spaces one level of indentation costs.
 //
@@ -165,4 +432,4 @@ pub fn member_order(members: [Str]) -> [Str] []
 //     println("${nbwrite.indent_width()}")   // 1
 // ```
 pub fn indent_width() -> Int []
-    todo("ipynb-nv.nbwrite.indent_width")
+    1

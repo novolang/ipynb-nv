@@ -1,9 +1,6 @@
 // nbvalidate — the shape rules the format's own schema enforces, as a
 // list of complaints rather than a yes or a no.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHAT IT CHECKS.  nbformat ships a JSON Schema per version, and
 // `nbformat.validate` runs a document against it.  This module is that
 // check, written as the rules themselves rather than as a schema
@@ -23,10 +20,32 @@
 // identifier is required at 4.5 and does not exist below it.  Every
 // check takes the notebook's own version from the notebook, so a 4.4
 // document is not told off for a member 4.5 invented.
+//
+// BLOCKING MEANS THE WRITER REFUSES.  `NbIssue.blocking` is exactly the
+// set `nbwrite.write` will not write: a cell that has no identifier at
+// 4.5, an identifier that breaks the rule, a member the cell's kind may
+// not carry, and a `metadata` that is not an object.  Each of those
+// would produce a file that claims a version it does not meet.  The
+// rest — a duplicated identifier, a stream whose `name` is neither
+// `stdout` nor `stderr`, an execution count below zero, an `image/png`
+// whose text is not base64 — are reported and written back as they
+// were, because the alternative to writing them is throwing away what
+// the file said.
+
+use std.json
+use std.list
+use std.str
+use nbcell
+use nberror
+use nbnotebook
 
 // One thing the format does not allow, and where.
 pub struct NbIssue
-    // The JSON Pointer of the member at fault: `"/cells/2/id"`.
+    // The JSON Pointer of the member at fault: `"/cells/2/id"`.  A
+    // MIME type or an attachment name inside it is escaped the way RFC
+    // 6901 says — `text/plain` is the segment `text~1plain` — because a
+    // MIME type has a `/` in it and a pointer that did not escape it
+    // would name a member that does not exist.
     path: Str
     // The rule that objected, as the fault it would be if the reading
     // were strict.
@@ -36,6 +55,159 @@ pub struct NbIssue
     // blocking; a stream output whose `name` is neither `"stdout"` nor
     // `"stderr"` is not, because the member is written back as it was.
     blocking: Bool
+
+// One segment of a JSON Pointer, escaped the way RFC 6901 § 3 says:
+// `~` becomes `~0` first, then `/` becomes `~1`.
+//
+// The order matters and is not interchangeable: escaping the slash
+// first would turn the `~` of the `~1` it had just written into `~01`.
+fn escaped(segment: Str) -> Str []
+    let tildes = str.replace(segment, "~", "~0")
+    let slashes = str.replace(tildes, "/", "~1")
+    slashes
+
+// An issue at a path.
+fn issue_at(path: Str, fault: NbFault, blocking: Bool) -> NbIssue []
+    NbIssue { path: path, fault: fault, blocking: blocking }
+
+// Whether a value is a multiline string: a JSON string, or an array of
+// JSON strings.
+fn is_multiline_string(v: JsonValueH) -> Bool []
+    match json.to_str(v)
+        Some(_) => true
+        None    =>
+            match json.to_list(v)
+                Some(items) => is_all_strings(items)
+                None        => false
+
+// Whether every element of an array is a JSON string.
+fn is_all_strings(items: [JsonValueH]) -> Bool []
+    for item in items
+        match json.to_str(item)
+            None    =>
+                return false
+            Some(_) => ()
+    true
+
+// Every rule one MIME bundle breaks, with the paths rooted at `prefix`.
+//
+// A payload must have the shape its MIME type calls for: a multiline
+// string under a `text/*` or a JSON type, base64 text under anything
+// else.  Both are reported and not blocking: the payload is written
+// back exactly as it came, so refusing the whole notebook over one
+// output's rendering would cost more than it saves.
+fn bundle_issues(b: NbMimeBundle, prefix: Str, var out: [NbIssue])
+    for e in b.entries
+        let pointer = prefix + "/" + escaped(e.mime)
+        if is_multiline_string(e.payload)
+            if nbcell.is_base64_mime(e.mime)
+                match nbcell.bundle_bytes(b, e.mime)
+                    Some(_) => ()
+                    None    =>
+                        list.push(out,
+                                  issue_at(pointer, NbBadBase64(pointer, e.mime), false))
+        else
+            list.push(out, issue_at(pointer, NbBadMimePayload(pointer, e.mime), false))
+
+// The metadata of an output, which the format requires to be an object.
+fn output_metadata_issues(m: JsonValueH, path: Str, var out: [NbIssue])
+    if json.type_of(m) != "object"
+        list.push(out,
+                  issue_at(path,
+                           NbWrongMemberType(path, "an object", json.type_of(m)),
+                           true))
+
+// Every rule one output breaks, with the paths rooted at `prefix`.
+fn output_issues(o: NbOutput, prefix: Str, major: Int, minor: Int, var out: [NbIssue])
+    match o
+        NbStream(name, text)                    =>
+            if name != "stdout" and name != "stderr"
+                list.push(out,
+                          issue_at(prefix + "/name",
+                                   NbWrongMemberType(prefix + "/name",
+                                                     "\"stdout\" or \"stderr\"",
+                                                     "\"" + name + "\""),
+                                   false))
+        NbDisplayData(data, metadata)           =>
+            bundle_issues(data, prefix + "/data", out)
+            output_metadata_issues(metadata, prefix + "/metadata", out)
+        NbExecuteResult(count, data, metadata)  =>
+            bundle_issues(data, prefix + "/data", out)
+            output_metadata_issues(metadata, prefix + "/metadata", out)
+            if count < 0
+                let pointer = prefix + "/execution_count"
+                list.push(out, issue_at(pointer, NbBadExecutionCount(pointer), false))
+        NbErrorOutput(ename, evalue, traceback) => ()
+
+// Whether an identifier has been used by a cell before position `at`.
+fn used_before(cells: [NbCell], at: Int, id: Str) -> Bool []
+    for i in 0..at
+        let c = list.get(cells, i)
+        if c.id == id
+            return true
+    false
+
+// Every rule one cell breaks, with the paths rooted at `prefix`.
+//
+// `major` and `minor` are the version the rules come from, which is the
+// notebook's own for `check` and a stated one for `check_at`.
+fn cell_issues(c: NbCell, prefix: Str, major: Int, minor: Int, var out: [NbIssue])
+    if minor >= 5
+        if c.id == ""
+            let pointer = prefix + "/id"
+            list.push(out, issue_at(pointer, NbMissingMember(pointer, "id"), true))
+        else
+            if not nbcell.is_valid_cell_id(c.id)
+                let pointer = prefix + "/id"
+                list.push(out, issue_at(pointer, NbBadCellId(pointer, c.id), true))
+    if json.type_of(c.metadata) != "object"
+        let pointer = prefix + "/metadata"
+        list.push(out,
+                  issue_at(pointer,
+                           NbWrongMemberType(pointer, "an object", json.type_of(c.metadata)),
+                           true))
+    let name = nbcell.kind_name(c.kind)
+    if name != "code"
+        if list.len(c.outputs) > 0
+            let pointer = prefix + "/outputs"
+            list.push(out, issue_at(pointer, NbForbiddenMember(pointer, "outputs"), true))
+        if c.execution_count != None
+            let pointer = prefix + "/execution_count"
+            list.push(out,
+                      issue_at(pointer,
+                               NbForbiddenMember(pointer, "execution_count"),
+                               true))
+    if name == "code"
+        if list.len(c.attachments) > 0
+            let pointer = prefix + "/attachments"
+            list.push(out, issue_at(pointer, NbForbiddenMember(pointer, "attachments"), true))
+    for i in 0..list.len(c.outputs)
+        let opath = prefix + "/outputs/" + str.from_int(i)
+        output_issues(list.get(c.outputs, i), opath, major, minor, out)
+    for i in 0..list.len(c.attachments)
+        let a = list.get(c.attachments, i)
+        let apath = prefix + "/attachments/" + escaped(a.name)
+        if a.name == ""
+            list.push(out, issue_at(apath, NbBadAttachment(apath, a.name), false))
+        bundle_issues(a.data, apath, out)
+
+// The identifiers used more than once, each reported at the cell that
+// repeats it.
+//
+// Not blocking, and the reason is the whole point of the rule: the
+// identifiers are for matching cells across a save, so a duplicated one
+// makes a lookup ambiguous and a save produce a file nbformat's own
+// validator rejects — but the document is still perfectly writable, and
+// a tool that refused to save it could not be the tool that fixes it.
+fn duplicate_issues(nb: NbNotebook, minor: Int, var out: [NbIssue])
+    if minor < 5
+        return
+    for i in 0..list.len(nb.cells)
+        let c = list.get(nb.cells, i)
+        if c.id != ""
+            if used_before(nb.cells, i, c.id)
+                let pointer = "/cells/" + str.from_int(i) + "/id"
+                list.push(out, issue_at(pointer, NbDuplicateCellId(pointer, c.id), false))
 
 // Every rule the notebook breaks, in document order.
 //
@@ -49,14 +221,29 @@ pub struct NbIssue
 //     println("${list.len(nbvalidate.check(nbnotebook.notebook()))}")   // 0
 // ```
 pub fn check(nb: NbNotebook) -> [NbIssue] []
-    todo("ipynb-nv.nbvalidate.check")
+    check_at(nb, nb.major, nb.minor)
 
 // The same, against a stated format version rather than the notebook's
 // own.
 //
 // What a caller about to call `nbwrite.write_at` asks first.
 pub fn check_at(nb: NbNotebook, major: Int, minor: Int) -> [NbIssue] []
-    todo("ipynb-nv.nbvalidate.check_at")
+    var out: [NbIssue] = []
+    if major != 4
+        list.push(out, issue_at("", NbUnsupportedFormat(major, minor), true))
+        return out
+    if json.type_of(nb.metadata) != "object"
+        list.push(out,
+                  issue_at("/metadata",
+                           NbWrongMemberType("/metadata",
+                                             "an object",
+                                             json.type_of(nb.metadata)),
+                           true))
+    for i in 0..list.len(nb.cells)
+        let prefix = "/cells/" + str.from_int(i)
+        cell_issues(list.get(nb.cells, i), prefix, major, minor, out)
+    duplicate_issues(nb, minor, out)
+    out
 
 // The first rule the notebook breaks, or `None`.
 //
@@ -70,7 +257,7 @@ pub fn check_at(nb: NbNotebook, major: Int, minor: Int) -> [NbIssue] []
 //         None    => println("this notebook satisfies its own version")
 // ```
 pub fn first_issue(nb: NbNotebook) -> ?NbIssue []
-    todo("ipynb-nv.nbvalidate.first_issue")
+    list.first(check(nb))
 
 // Whether the notebook satisfies its own version's rules.
 //
@@ -82,14 +269,18 @@ pub fn first_issue(nb: NbNotebook) -> ?NbIssue []
 //     println("${nbvalidate.is_valid(nbnotebook.notebook())}")   // true
 // ```
 pub fn is_valid(nb: NbNotebook) -> Bool []
-    todo("ipynb-nv.nbvalidate.is_valid")
+    list.len(check(nb)) == 0
 
 // Only the issues that stop the notebook being written.
 //
 // The set `nbwrite.write` refuses over.  A tool offering to save asks
 // this and a tool offering to lint asks `check`.
 pub fn blocking_issues(nb: NbNotebook) -> [NbIssue] []
-    todo("ipynb-nv.nbvalidate.blocking_issues")
+    var out: [NbIssue] = []
+    for i in check(nb)
+        if i.blocking
+            list.push(out, i)
+    out
 
 // Every rule one cell breaks, with the paths rooted at that cell.
 //
@@ -105,11 +296,15 @@ pub fn blocking_issues(nb: NbNotebook) -> [NbIssue] []
 //     println("${list.len(issues)}")   // 0
 // ```
 pub fn check_cell(c: NbCell, major: Int, minor: Int) -> [NbIssue] []
-    todo("ipynb-nv.nbvalidate.check_cell")
+    var out: [NbIssue] = []
+    cell_issues(c, "", major, minor, out)
+    out
 
 // Every rule one output breaks.
 pub fn check_output(o: NbOutput, major: Int, minor: Int) -> [NbIssue] []
-    todo("ipynb-nv.nbvalidate.check_output")
+    var out: [NbIssue] = []
+    output_issues(o, "", major, minor, out)
+    out
 
 // Every rule one MIME bundle breaks: a payload that is not the shape
 // its MIME type requires, and base64 text that is not base64.
@@ -118,12 +313,14 @@ pub fn check_output(o: NbOutput, major: Int, minor: Int) -> [NbIssue] []
 // payload to find out, which is why it is separable and why `check`
 // says in its own documentation that it performs it.
 pub fn check_bundle(b: NbMimeBundle) -> [NbIssue] []
-    todo("ipynb-nv.nbvalidate.check_bundle")
+    var out: [NbIssue] = []
+    bundle_issues(b, "", out)
+    out
 
 // A one-line report of an issue, for a linter's output.
 //
 // The path, a colon and the fault's own sentence:
-// `"/cells/2/id: a cell identifier is required at nbformat 4.5"`.
+// `"/cells/2/id: a required member is missing: id"`.
 //
 // ```novo
 // use nbcell
@@ -135,11 +332,15 @@ pub fn check_bundle(b: NbMimeBundle) -> [NbIssue] []
 //         None    => println("no issue")
 // ```
 pub fn issue_text(i: NbIssue) -> Str []
-    todo("ipynb-nv.nbvalidate.issue_text")
+    if i.path == ""
+        let f = i.fault
+        return f.message()
+    let f = i.fault
+    i.path + ": " + f.message()
 
 // The first rule one cell breaks, or `None`.
 pub fn first_issue_of_cell(c: NbCell, major: Int, minor: Int) -> ?NbIssue []
-    todo("ipynb-nv.nbvalidate.first_issue_of_cell")
+    list.first(check_cell(c, major, minor))
 
 // Which members a cell of this kind may carry, at this version.
 //
@@ -156,11 +357,26 @@ pub fn first_issue_of_cell(c: NbCell, major: Int, minor: Int) -> ?NbIssue []
 //     println("${list.len(nbvalidate.allowed_members(NbMarkdown, 4, 5))}")
 // ```
 pub fn allowed_members(kind: NbCellKind, major: Int, minor: Int) -> [Str] []
-    todo("ipynb-nv.nbvalidate.allowed_members")
+    var out: [Str] = ["cell_type", "metadata", "source"]
+    if minor >= 5
+        list.push(out, "id")
+    let name = nbcell.kind_name(kind)
+    if name == "code"
+        list.push(out, "outputs")
+        list.push(out, "execution_count")
+    else
+        list.push(out, "attachments")
+    out
 
 // Which members a cell of this kind must carry, at this version.
 //
 // `"cell_type"`, `"source"` and `"metadata"` always; `"id"` from 4.5;
 // `"outputs"` and `"execution_count"` on a code cell.
 pub fn required_members(kind: NbCellKind, major: Int, minor: Int) -> [Str] []
-    todo("ipynb-nv.nbvalidate.required_members")
+    var out: [Str] = ["cell_type", "metadata", "source"]
+    if minor >= 5
+        list.push(out, "id")
+    if nbcell.kind_name(kind) == "code"
+        list.push(out, "outputs")
+        list.push(out, "execution_count")
+    out

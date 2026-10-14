@@ -1,9 +1,6 @@
 // nbcell — a cell, its outputs, the MIME bundles inside them, and the
 // attachments beside them.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // A MULTILINE STRING IS ONE TEXT, WRITTEN TWO WAYS.  nbformat calls a
 // `source`, a `text` and a text MIME payload a "multiline string", and
 // says it is either a JSON string or a JSON array of strings whose
@@ -31,6 +28,11 @@
 // a map, for the same reason a BSON document is: the order is in the
 // file, a writer that sorted it would produce a diff nobody asked for,
 // and the rules a validator applies are per entry.
+
+use std.bytes
+use std.json
+use std.list
+use std.str
 
 // What kind of cell this is.
 //
@@ -139,7 +141,14 @@ pub struct NbCell
 //     println(c.source)   // print(1)
 // ```
 pub fn code_cell(id: Str, source: Str) -> NbCell []
-    todo("ipynb-nv.nbcell.code_cell")
+    NbCell {
+        id: id,
+        kind: NbCode,
+        source: source,
+        metadata: json.object([]),
+        outputs: [],
+        execution_count: None,
+        attachments: [] }
 
 // A markdown cell with the given identifier and source.
 //
@@ -150,11 +159,25 @@ pub fn code_cell(id: Str, source: Str) -> NbCell []
 //     println(nbcell.kind_name(nbcell.markdown_cell("x1", "# Title").kind))
 // ```
 pub fn markdown_cell(id: Str, source: Str) -> NbCell []
-    todo("ipynb-nv.nbcell.markdown_cell")
+    NbCell {
+        id: id,
+        kind: NbMarkdown,
+        source: source,
+        metadata: json.object([]),
+        outputs: [],
+        execution_count: None,
+        attachments: [] }
 
 // A raw cell with the given identifier and source.
 pub fn raw_cell(id: Str, source: Str) -> NbCell []
-    todo("ipynb-nv.nbcell.raw_cell")
+    NbCell {
+        id: id,
+        kind: NbRaw,
+        source: source,
+        metadata: json.object([]),
+        outputs: [],
+        execution_count: None,
+        attachments: [] }
 
 // The `cell_type` string for a kind: `"code"`, `"markdown"`, `"raw"`.
 //
@@ -165,11 +188,26 @@ pub fn raw_cell(id: Str, source: Str) -> NbCell []
 //     println(nbcell.kind_name(NbRaw))   // raw
 // ```
 pub fn kind_name(k: NbCellKind) -> Str []
-    todo("ipynb-nv.nbcell.kind_name")
+    match k
+        NbCode     => "code"
+        NbMarkdown => "markdown"
+        NbRaw      => "raw"
 
 // The kind a `cell_type` string names, or `None`.
 pub fn kind_named(name: Str) -> ?NbCellKind []
-    todo("ipynb-nv.nbcell.kind_named")
+    match name
+        "code"     => Some(NbCode)
+        "markdown" => Some(NbMarkdown)
+        "raw"      => Some(NbRaw)
+        _          => None
+
+// Whether one byte is a letter, a digit, `-` or `_` — the alphabet of
+// the 4.5 identifier rule.
+fn is_id_byte(b: Int) -> Bool
+    let digit = b >= 48 and b <= 57
+    let upper = b >= 65 and b <= 90
+    let lower = b >= 97 and b <= 122
+    digit or upper or lower or b == 45 or b == 95
 
 // Whether a cell identifier satisfies the nbformat 4.5 rule: between
 // one and sixty-four characters, each a letter, a digit, `-` or `_`.
@@ -187,7 +225,15 @@ pub fn kind_named(name: Str) -> ?NbCellKind []
 //     println("${nbcell.is_valid_cell_id("has a space")}")  // false
 // ```
 pub fn is_valid_cell_id(id: Str) -> Bool []
-    todo("ipynb-nv.nbcell.is_valid_cell_id")
+    let n = str.len(id)
+    if n == 0
+        return false
+    if n > 64
+        return false
+    for i in 0..n
+        if not is_id_byte(str.byte_at_or(id, i, 0))
+            return false
+    true
 
 // `c` with a different identifier.
 //
@@ -205,14 +251,28 @@ pub fn is_valid_cell_id(id: Str) -> Bool []
 //     println(c.id)   // f00d
 // ```
 pub fn cell_id(c: NbCell, id: Str) -> NbCell []
-    todo("ipynb-nv.nbcell.cell_id")
+    NbCell {
+        id: id,
+        kind: c.kind,
+        source: c.source,
+        metadata: c.metadata,
+        outputs: c.outputs,
+        execution_count: c.execution_count,
+        attachments: c.attachments }
 
 // `c` with its outputs replaced.
 //
 // The call a tool makes after a kernel answered.  Nothing here runs the
 // cell; the outputs arrive from whatever did.
 pub fn with_outputs(c: NbCell, outputs: [NbOutput]) -> NbCell []
-    todo("ipynb-nv.nbcell.with_outputs")
+    NbCell {
+        id: c.id,
+        kind: c.kind,
+        source: c.source,
+        metadata: c.metadata,
+        outputs: outputs,
+        execution_count: c.execution_count,
+        attachments: c.attachments }
 
 // `c` with no outputs and no execution count.
 //
@@ -227,27 +287,74 @@ pub fn with_outputs(c: NbCell, outputs: [NbOutput]) -> NbCell []
 //     println("${list.len(c.outputs)}")   // 0
 // ```
 pub fn cleared(c: NbCell) -> NbCell []
-    todo("ipynb-nv.nbcell.cleared")
+    NbCell {
+        id: c.id,
+        kind: c.kind,
+        source: c.source,
+        metadata: c.metadata,
+        outputs: [],
+        execution_count: None,
+        attachments: c.attachments }
 
 // `c` with a different execution count, or none.
 pub fn with_execution_count(c: NbCell, count: ?Int) -> NbCell []
-    todo("ipynb-nv.nbcell.with_execution_count")
+    NbCell {
+        id: c.id,
+        kind: c.kind,
+        source: c.source,
+        metadata: c.metadata,
+        outputs: c.outputs,
+        execution_count: count,
+        attachments: c.attachments }
 
 // `c` with a different source.
 pub fn with_source(c: NbCell, source: Str) -> NbCell []
-    todo("ipynb-nv.nbcell.with_source")
+    NbCell {
+        id: c.id,
+        kind: c.kind,
+        source: source,
+        metadata: c.metadata,
+        outputs: c.outputs,
+        execution_count: c.execution_count,
+        attachments: c.attachments }
 
 // `c` with a different metadata object.
 pub fn with_metadata(c: NbCell, metadata: JsonValueH) -> NbCell []
-    todo("ipynb-nv.nbcell.with_metadata")
+    NbCell {
+        id: c.id,
+        kind: c.kind,
+        source: c.source,
+        metadata: metadata,
+        outputs: c.outputs,
+        execution_count: c.execution_count,
+        attachments: c.attachments }
 
 // `c` with one more attachment.
 pub fn with_attachment(c: NbCell, a: NbAttachment) -> NbCell []
-    todo("ipynb-nv.nbcell.with_attachment")
+    let more = list.concat(c.attachments, [a])
+    NbCell {
+        id: c.id,
+        kind: c.kind,
+        source: c.source,
+        metadata: c.metadata,
+        outputs: c.outputs,
+        execution_count: c.execution_count,
+        attachments: more }
 
 // One attachment.
 pub fn attachment(name: Str, data: NbMimeBundle) -> NbAttachment []
-    todo("ipynb-nv.nbcell.attachment")
+    NbAttachment { name: name, data: data }
+
+// The text one output holds when it is a `stdout` stream, or `""` for
+// every other output.  The join `stdout_text` performs is then a join
+// over the whole output list with the irrelevant entries empty.
+fn stdout_of(o: NbOutput) -> Str []
+    match o
+        NbStream(name, text) => if name == "stdout"
+            text
+        else
+            ""
+        _                    => ""
 
 // The text of a `"stream"` output whose name is `"stdout"`, joined in
 // file order, or `""`.
@@ -263,14 +370,31 @@ pub fn attachment(name: Str, data: NbMimeBundle) -> NbAttachment []
 //     println(nbcell.stdout_text(nbcell.code_cell("a1", "print(1)")))   // (empty)
 // ```
 pub fn stdout_text(c: NbCell) -> Str []
-    todo("ipynb-nv.nbcell.stdout_text")
+    let parts: [Str] = list.map(c.outputs, o => stdout_of(o))
+    list.join(parts, "")
+
+// The exception name of an error output, or `None` for anything else.
+fn error_name_of(o: NbOutput) -> ?Str []
+    match o
+        NbErrorOutput(ename, evalue, traceback) => Some(ename)
+        _                                       => None
+
+// The first `Some` in a list of optionals, or `None`.
+fn first_some(xs: [?Str]) -> ?Str []
+    for x in xs
+        match x
+            Some(s) =>
+                return Some(s)
+            None    => ()
+    None
 
 // The first `"error"` output's exception name, or `None`.
 //
 // What tells a caller that a cell failed, which is otherwise a walk
 // over the outputs.
 pub fn first_error(c: NbCell) -> ?Str []
-    todo("ipynb-nv.nbcell.first_error")
+    let names: [?Str] = list.map(c.outputs, o => error_name_of(o))
+    first_some(names)
 
 // The `output_type` string for an output: `"stream"`, `"display_data"`,
 // `"execute_result"`, `"error"`.
@@ -282,25 +406,43 @@ pub fn first_error(c: NbCell) -> ?Str []
 //     println(nbcell.output_type_name(NbStream("stdout", "hi\n")))
 // ```
 pub fn output_type_name(o: NbOutput) -> Str []
-    todo("ipynb-nv.nbcell.output_type_name")
+    match o
+        NbStream(name, text)             => "stream"
+        NbDisplayData(data, metadata)    => "display_data"
+        NbExecuteResult(count, data, md) => "execute_result"
+        NbErrorOutput(ename, evalue, tb) => "error"
 
 // An empty MIME bundle.
 pub fn bundle() -> NbMimeBundle []
-    todo("ipynb-nv.nbcell.bundle")
+    NbMimeBundle { entries: [] }
 
 // `b` with one more entry at the end.
 pub fn bundle_with(b: NbMimeBundle, mime: Str, payload: JsonValueH) -> NbMimeBundle []
-    todo("ipynb-nv.nbcell.bundle_with")
+    let more = list.concat(b.entries, [NbMimeEntry { mime: mime, payload: payload }])
+    NbMimeBundle { entries: more }
+
+// The position of an entry, or `None`.
+fn entry_index(b: NbMimeBundle, mime: Str) -> ?Int []
+    for i in 0..list.len(b.entries)
+        let e = list.get(b.entries, i)
+        if e.mime == mime
+            return Some(i)
+    None
 
 // The payload under a MIME type, or `None`.
 pub fn bundle_get(b: NbMimeBundle, mime: Str) -> ?JsonValueH []
-    todo("ipynb-nv.nbcell.bundle_get")
+    match entry_index(b, mime)
+        None    => None
+        Some(i) =>
+            let e = list.get(b.entries, i)
+            Some(e.payload)
 
 // Every MIME type in the bundle, in file order.
 //
 // What a consumer matches against the types it can show.
 pub fn bundle_mimes(b: NbMimeBundle) -> [Str] []
-    todo("ipynb-nv.nbcell.bundle_mimes")
+    let mimes: [Str] = list.map(b.entries, e => e.mime)
+    mimes
 
 // The first MIME type in a caller's preference list that the bundle
 // has, or `None`.
@@ -319,7 +461,37 @@ pub fn bundle_mimes(b: NbMimeBundle) -> [Str] []
 //         None    => println("nothing this renderer can show")
 // ```
 pub fn bundle_prefer(b: NbMimeBundle, prefer: [Str]) -> ?Str []
-    todo("ipynb-nv.nbcell.bundle_prefer")
+    for mime in prefer
+        match entry_index(b, mime)
+            Some(i) =>
+                return Some(mime)
+            None    => ()
+    None
+
+// The text of a multiline string, whichever of its two spellings the
+// value uses, or `None` for a value that is neither.
+//
+// The reader's `nbread.multiline` is this rule, and it is spelled again
+// here rather than called: `nbread` reads cells, and a call back the
+// other way would make the two modules name each other.
+fn multiline_text(j: JsonValueH) -> ?Str []
+    match json.to_str(j)
+        Some(s) => Some(s)
+        None    =>
+            match json.to_list(j)
+                Some(items) => strings_joined(items)
+                None        => None
+
+// Every element of a JSON array as one text, or `None` when one of them
+// is not a string.
+fn strings_joined(items: [JsonValueH]) -> ?Str []
+    var parts: [Str] = []
+    for item in items
+        match json.to_str(item)
+            Some(s) => list.push(parts, s)
+            None    =>
+                return None
+    Some(list.join(parts, ""))
 
 // The payload under a MIME type as text, with a multiline string's two
 // spellings already collapsed, or `None`.
@@ -328,7 +500,11 @@ pub fn bundle_prefer(b: NbMimeBundle, prefer: [Str]) -> ?Str []
 // an `application/json` payload is a JSON value and comes back through
 // `bundle_get`.
 pub fn bundle_text(b: NbMimeBundle, mime: Str) -> ?Str []
-    todo("ipynb-nv.nbcell.bundle_text")
+    match entry_index(b, mime)
+        None    => None
+        Some(i) =>
+            let e = list.get(b.entries, i)
+            multiline_text(e.payload)
 
 // The payload under a MIME type as bytes, decoded from the base64 the
 // file holds, or `None`.
@@ -348,7 +524,13 @@ pub fn bundle_text(b: NbMimeBundle, mime: Str) -> ?Str []
 //         None    => println("no image in this bundle")
 // ```
 pub fn bundle_bytes(b: NbMimeBundle, mime: Str) -> ?Bytes []
-    todo("ipynb-nv.nbcell.bundle_bytes")
+    match entry_index(b, mime)
+        None    => None
+        Some(i) =>
+            let e = list.get(b.entries, i)
+            match multiline_text(e.payload)
+                Some(text) => bytes.from_base64(text)
+                None       => None
 
 // Whether a MIME type is one nbformat writes as base64 rather than as
 // text.
@@ -365,7 +547,13 @@ pub fn bundle_bytes(b: NbMimeBundle, mime: Str) -> ?Bytes []
 //     println("${nbcell.is_base64_mime("application/geo+json")}")  // false
 // ```
 pub fn is_base64_mime(mime: Str) -> Bool []
-    todo("ipynb-nv.nbcell.is_base64_mime")
+    if str.starts_with(mime, "text/")
+        return false
+    if mime == "application/json"
+        return false
+    if str.ends_with(mime, "+json")
+        return false
+    true
 
 // A text split the way nbformat's writer splits a multiline string:
 // every line keeps its own `\n`, and the last line has none unless the
@@ -384,7 +572,16 @@ pub fn is_base64_mime(mime: Str) -> Bool []
 //     println("${list.len(nbcell.split_lines("a\nb\n"))}")   // 2
 // ```
 pub fn split_lines(text: Str) -> [Str] []
-    todo("ipynb-nv.nbcell.split_lines")
+    var out: [Str] = []
+    var start = 0
+    let n = str.len(text)
+    for i in 0..n
+        if str.byte_at_or(text, i, 0) == 10
+            list.push(out, str.slice(text, start, i + 1))
+            start = i + 1
+    if start < n
+        list.push(out, str.slice(text, start, n))
+    out
 
 // The inverse: the lines of a multiline string joined back into one
 // text.
@@ -392,4 +589,4 @@ pub fn split_lines(text: Str) -> [Str] []
 // What the reader applies to the array spelling, so that both spellings
 // arrive as the same `Str`.
 pub fn join_lines(lines: [Str]) -> Str []
-    todo("ipynb-nv.nbcell.join_lines")
+    list.join(lines, "")

@@ -1,9 +1,6 @@
 // nbnotebook — the document itself: a format version, a metadata
 // object, and an ordered list of cells.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // WHAT A NOTEBOOK IS.  A `.ipynb` file is a single JSON object with
 // four members: `nbformat` and `nbformat_minor`, which are the major
 // and minor version of the format; `metadata`, which is where the
@@ -24,6 +21,11 @@
 // to bottom — and the identifiers 4.5 added are for matching cells
 // across a save, not for addressing them.  `cell_by_id` exists for the
 // caller that has one.
+
+use std.json
+use std.list
+use nbcell
+use nberror
 
 // A notebook.
 pub struct NbNotebook
@@ -49,7 +51,7 @@ pub struct NbNotebook
 //     println("${nb.major}.${nb.minor}")   // 4.5
 // ```
 pub fn notebook() -> NbNotebook []
-    todo("ipynb-nv.nbnotebook.notebook")
+    NbNotebook { major: 4, minor: 5, metadata: json.object([]), cells: [] }
 
 // An empty notebook at a stated format version.
 //
@@ -66,15 +68,42 @@ pub fn notebook() -> NbNotebook []
 //         Err(e) => println(e.message())
 // ```
 pub fn notebook_at(major: Int, minor: Int) -> Result<NbNotebook, NbFault> []
-    todo("ipynb-nv.nbnotebook.notebook_at")
+    if major != 4
+        return Err(NbUnsupportedFormat(major, minor))
+    Ok(NbNotebook { major: major, minor: minor, metadata: json.object([]), cells: [] })
 
 // How many cells the notebook has.
 pub fn cell_count(nb: NbNotebook) -> Int []
-    todo("ipynb-nv.nbnotebook.cell_count")
+    list.len(nb.cells)
 
 // The cell at a position, or `None`.
 pub fn cell_at(nb: NbNotebook, index: Int) -> ?NbCell []
-    todo("ipynb-nv.nbnotebook.cell_at")
+    list.nth(nb.cells, index)
+
+// The position of the cell with an identifier, or `None`.
+//
+// An identifier the caller has not been handed finds nothing, and so
+// does the empty string: a cell carrying no identifier is not a cell
+// carrying the empty one, and `cell_by_id(nb, "")` answering the first
+// unread cell would make a lookup for a missing identifier look like a
+// hit.
+//
+// ```novo
+// use nbnotebook
+//
+// fn main() [io]
+//     match nbnotebook.index_of(nbnotebook.notebook(), "a1b2")
+//         Some(i) => println("${i}")
+//         None    => println("no cell with that id")
+// ```
+pub fn index_of(nb: NbNotebook, id: Str) -> ?Int []
+    if id == ""
+        return None
+    for i in 0..list.len(nb.cells)
+        let c = list.get(nb.cells, i)
+        if c.id == id
+            return Some(i)
+    None
 
 // The cell with an identifier, or `None`.
 //
@@ -91,11 +120,9 @@ pub fn cell_at(nb: NbNotebook, index: Int) -> ?NbCell []
 //         None    => println("no cell with that id")
 // ```
 pub fn cell_by_id(nb: NbNotebook, id: Str) -> ?NbCell []
-    todo("ipynb-nv.nbnotebook.cell_by_id")
-
-// The position of the cell with an identifier, or `None`.
-pub fn index_of(nb: NbNotebook, id: Str) -> ?Int []
-    todo("ipynb-nv.nbnotebook.index_of")
+    match index_of(nb, id)
+        None    => None
+        Some(i) => cell_at(nb, i)
 
 // `nb` with one more cell at the end.
 //
@@ -109,29 +136,82 @@ pub fn index_of(nb: NbNotebook, id: Str) -> ?Int []
 //     println("${nbnotebook.cell_count(nb)}")   // 1
 // ```
 pub fn append(nb: NbNotebook, c: NbCell) -> NbNotebook []
-    todo("ipynb-nv.nbnotebook.append")
+    let cells: [NbCell] = list.concat(nb.cells, [c])
+    with_cells(nb, cells)
 
 // `nb` with a cell inserted at a position, and the rest moved down.
 //
 // A position past the end appends; a negative one inserts at the front.
 pub fn insert(nb: NbNotebook, index: Int, c: NbCell) -> NbNotebook []
-    todo("ipynb-nv.nbnotebook.insert")
+    let n = list.len(nb.cells)
+    var at = index
+    if at < 0
+        at = 0
+    if at > n
+        at = n
+    let head: [NbCell] = list.slice(nb.cells, 0, at)
+    let tail: [NbCell] = list.slice(nb.cells, at, n)
+    let middle: [NbCell] = list.concat(head, [c])
+    let cells: [NbCell] = list.concat(middle, tail)
+    with_cells(nb, cells)
 
 // `nb` with the cell at a position replaced.
+//
+// A position outside the document leaves the notebook as it was: there
+// is no cell to replace, and dropping the new one into a position the
+// document does not have would be an insertion the caller did not ask
+// for.
 pub fn replace_at(nb: NbNotebook, index: Int, c: NbCell) -> NbNotebook []
-    todo("ipynb-nv.nbnotebook.replace_at")
+    let n = list.len(nb.cells)
+    if index < 0 or index >= n
+        return nb
+    let head: [NbCell] = list.slice(nb.cells, 0, index)
+    let tail: [NbCell] = list.slice(nb.cells, index + 1, n)
+    let middle: [NbCell] = list.concat(head, [c])
+    let cells: [NbCell] = list.concat(middle, tail)
+    with_cells(nb, cells)
 
 // `nb` without the cell at a position.
+//
+// A position outside the document leaves the notebook as it was.
 pub fn remove_at(nb: NbNotebook, index: Int) -> NbNotebook []
-    todo("ipynb-nv.nbnotebook.remove_at")
+    let n = list.len(nb.cells)
+    if index < 0 or index >= n
+        return nb
+    let head: [NbCell] = list.slice(nb.cells, 0, index)
+    let tail: [NbCell] = list.slice(nb.cells, index + 1, n)
+    let cells: [NbCell] = list.concat(head, tail)
+    with_cells(nb, cells)
 
 // `nb` with its cells replaced.
 pub fn with_cells(nb: NbNotebook, cells: [NbCell]) -> NbNotebook []
-    todo("ipynb-nv.nbnotebook.with_cells")
+    NbNotebook {
+        major: nb.major,
+        minor: nb.minor,
+        metadata: nb.metadata,
+        cells: cells }
 
 // `nb` with a different metadata object.
 pub fn with_metadata(nb: NbNotebook, metadata: JsonValueH) -> NbNotebook []
-    todo("ipynb-nv.nbnotebook.with_metadata")
+    NbNotebook {
+        major: nb.major,
+        minor: nb.minor,
+        metadata: metadata,
+        cells: nb.cells }
+
+// One string member of a nested metadata object, or `""`.
+//
+// Two `json.get` calls rather than one `json.query`: `query` takes a
+// dot-path, and a metadata key is arbitrary text that may itself
+// contain a dot — `metadata["a.b"]` is one key, and no path string can
+// name it.
+fn metadata_str(metadata: JsonValueH, outer: Str, inner: Str) -> Str []
+    match json.get(metadata, outer)
+        None    => ""
+        Some(m) =>
+            match json.get(m, inner)
+                None    => ""
+                Some(v) => json.to_str(v) ?? ""
 
 // The name under `metadata.kernelspec.name`, or `""`.
 //
@@ -147,11 +227,11 @@ pub fn with_metadata(nb: NbNotebook, metadata: JsonValueH) -> NbNotebook []
 //     println(nbnotebook.kernel_name(nbnotebook.notebook()))   // (empty)
 // ```
 pub fn kernel_name(nb: NbNotebook) -> Str []
-    todo("ipynb-nv.nbnotebook.kernel_name")
+    metadata_str(nb.metadata, "kernelspec", "name")
 
 // The name under `metadata.language_info.name`, or `""`.
 pub fn language_name(nb: NbNotebook) -> Str []
-    todo("ipynb-nv.nbnotebook.language_name")
+    metadata_str(nb.metadata, "language_info", "name")
 
 // `nb` with every code cell's outputs and execution count gone.
 //
@@ -168,7 +248,28 @@ pub fn language_name(nb: NbNotebook) -> Str []
 //     println("${nbnotebook.cell_count(nbnotebook.cleared(nbnotebook.notebook()))}")
 // ```
 pub fn cleared(nb: NbNotebook) -> NbNotebook []
-    todo("ipynb-nv.nbnotebook.cleared")
+    var cells: [NbCell] = []
+    for c in nb.cells
+        list.push(cells, nbcell.cleared(c))
+    with_cells(nb, cells)
+
+// How many cells carry no identifier.
+//
+// How many identifiers `upgraded` will want.
+pub fn cells_without_id(nb: NbNotebook) -> Int []
+    var n = 0
+    for c in nb.cells
+        if c.id == ""
+            n = n + 1
+    n
+
+// One cell with an identifier it did not have.
+fn with_id(c: NbCell, id: Str) -> NbCell []
+    nbcell.cell_id(c, id)
+
+// A sentence naming what `upgraded` found short.
+fn upgrade_why(needed: Int, given: Int) -> Str []
+    "${needed} cell(s) have no identifier and ${given} were given"
 
 // `nb` at nbformat 4.5, with the identifiers a caller supplies given to
 // the cells that have none.
@@ -179,7 +280,10 @@ pub fn cleared(nb: NbNotebook) -> NbNotebook []
 // many as `cells_without_id` says it needs and hands them over in that
 // order.
 //
-// `NbNotWritableAt` when there are too few.
+// `NbNotWritableAt` when there are too few, and when one of them is not
+// an identifier `is_valid_cell_id` accepts — a notebook this function
+// answered with is one `nbwrite.write` will write, which is the whole
+// point of asking for them.
 //
 // ```novo
 // use nbnotebook
@@ -190,21 +294,52 @@ pub fn cleared(nb: NbNotebook) -> NbNotebook []
 //         Err(e) => println(e.message())
 // ```
 pub fn upgraded(nb: NbNotebook, fresh_ids: [Str]) -> Result<NbNotebook, NbFault> []
-    todo("ipynb-nv.nbnotebook.upgraded")
+    let needed = cells_without_id(nb)
+    if list.len(fresh_ids) < needed
+        return Err(NbNotWritableAt(4, 5, upgrade_why(needed, list.len(fresh_ids))))
+    for id in fresh_ids
+        if not nbcell.is_valid_cell_id(id)
+            return Err(NbNotWritableAt(4, 5, "'${id}' is not a cell identifier"))
+    var cells: [NbCell] = []
+    var next = 0
+    for c in nb.cells
+        if c.id == ""
+            list.push(cells, with_id(c, list.get(fresh_ids, next)))
+            next = next + 1
+        else
+            list.push(cells, c)
+    Ok(NbNotebook {
+        major: 4,
+        minor: 5,
+        metadata: nb.metadata,
+        cells: cells })
 
-// How many cells carry no identifier.
-//
-// How many identifiers `upgraded` will want.
-pub fn cells_without_id(nb: NbNotebook) -> Int []
-    todo("ipynb-nv.nbnotebook.cells_without_id")
+// How many cells in a list carry an identifier.
+fn count_with_id(cells: [NbCell], id: Str) -> Int []
+    var n = 0
+    for c in cells
+        if c.id == id
+            n = n + 1
+    n
 
 // Every cell identifier that appears more than once, each named once.
 //
 // nbformat 4.5 requires them to be unique, and a notebook that broke
 // the rule is one a tool has to be told about rather than one it should
 // refuse to open.
+//
+// The empty string is not an identifier and is never named here: the
+// cells that carry it are the subject of `cells_without_id`, and
+// reporting a hundred unread cells as a hundred duplicates of one
+// another would bury the one duplicated name a tool has to fix.
 pub fn duplicate_ids(nb: NbNotebook) -> [Str] []
-    todo("ipynb-nv.nbnotebook.duplicate_ids")
+    var out: [Str] = []
+    for c in nb.cells
+        if c.id != ""
+            if count_with_id(nb.cells, c.id) > 1
+                if not list.contains(out, c.id)
+                    list.push(out, c.id)
+    out
 
 // Every cell of one kind, in document order.
 //
@@ -215,7 +350,11 @@ pub fn duplicate_ids(nb: NbNotebook) -> [Str] []
 //     println("${list.len(nbnotebook.cells_of_kind(nbnotebook.notebook(), NbCode))}")
 // ```
 pub fn cells_of_kind(nb: NbNotebook, kind: NbCellKind) -> [NbCell] []
-    todo("ipynb-nv.nbnotebook.cells_of_kind")
+    var out: [NbCell] = []
+    for c in nb.cells
+        if nbcell.kind_name(c.kind) == nbcell.kind_name(kind)
+            list.push(out, c)
+    out
 
 // The source of every code cell, joined with a blank line between them.
 //
@@ -224,6 +363,11 @@ pub fn cells_of_kind(nb: NbNotebook, kind: NbCellKind) -> [NbCell] []
 // consumer writes the same walk, and because a walk that included
 // markdown cells would produce text that is not the language's.
 //
+// The join is `"\n"` and not `"\n\n"`: a source from a notebook almost
+// always ends in a newline, so one newline between two of them IS the
+// blank line, and one newline is also what leaves a single code cell's
+// text exactly as the cell holds it.
+//
 // ```novo
 // use nbnotebook
 //
@@ -231,4 +375,8 @@ pub fn cells_of_kind(nb: NbNotebook, kind: NbCellKind) -> [NbCell] []
 //     println(nbnotebook.code_source(nbnotebook.notebook()))   // (empty)
 // ```
 pub fn code_source(nb: NbNotebook) -> Str []
-    todo("ipynb-nv.nbnotebook.code_source")
+    var parts: [Str] = []
+    for c in nb.cells
+        if nbcell.kind_name(c.kind) == "code"
+            list.push(parts, c.source)
+    list.join(parts, "\n")

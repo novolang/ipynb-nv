@@ -1,9 +1,6 @@
 // nberror — every refusal, and the one sentence each of them renders
 // to.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // TWO KINDS OF WRONG, AND THEY ARE NOT THE SAME KIND.  A notebook can
 // fail to be JSON at all, and it can be JSON of the wrong shape.  The
 // first is fatal: there is no document, and `nbread.read` answers an
@@ -72,11 +69,32 @@ pub enum NbFault
 
 // The standard `Error` implementation, so a bad notebook can be
 // reported by anything that reports errors.
+//
+// The sentence names what is wrong — the member, the MIME type, the
+// version, the identifier — and `path_of` names where, so a caller that
+// wants both writes the two together, which is exactly what
+// `nbvalidate.issue_text` does.
 impl Error for NbFault
     // Answer the one-line report: what was wrong, and where in the
     // document.
     fn message(self) -> Str
-        todo("ipynb-nv.nberror.NbFault.message")
+        match self
+            NbNotJson(at)                      => "the text is not JSON"
+            NbNotAnObject                      => "the top-level JSON value is not an object"
+            NbNoFormatVersion                  => "nbformat is missing, or is not an integer"
+            NbUnsupportedFormat(major, minor)  => "nbformat ${major}.${minor} is not a format this package reads; only major version 4 is"
+            NbMissingMember(path, member)      => "a required member is missing: ${member}"
+            NbWrongMemberType(path, want, saw) => "${saw} where ${want} is required"
+            NbUnknownCellType(path, saw)       => "unknown cell_type '${saw}'"
+            NbUnknownOutputType(path, saw)     => "unknown output_type '${saw}'"
+            NbBadCellId(path, saw)             => "'${saw}' is not a cell identifier: one to sixty-four letters, digits, '-' or '_'"
+            NbDuplicateCellId(path, id)        => "the cell identifier '${id}' is used more than once"
+            NbForbiddenMember(path, member)    => "a cell of this kind may not carry '${member}'"
+            NbBadMimePayload(path, mime)       => "the payload under '${mime}' is not the shape that MIME type requires"
+            NbBadBase64(path, mime)            => "the payload under '${mime}' is not base64"
+            NbBadAttachment(path, name)        => "not an attachment: '${name}'"
+            NbBadExecutionCount(path)          => "an execution count must be null or a non-negative integer"
+            NbNotWritableAt(major, minor, why) => "the notebook does not satisfy nbformat ${major}.${minor}: ${why}"
 
 // The JSON Pointer of the member at fault, or `""` for the faults that
 // are about the document as a whole.
@@ -88,7 +106,23 @@ impl Error for NbFault
 //     println(nberror.path_of(NbMissingMember("/cells/2", "id")))   // /cells/2
 // ```
 pub fn path_of(f: NbFault) -> Str []
-    todo("ipynb-nv.nberror.path_of")
+    match f
+        NbNotJson(at)                   => ""
+        NbNotAnObject                   => ""
+        NbNoFormatVersion               => ""
+        NbUnsupportedFormat(maj, min)   => ""
+        NbMissingMember(path, member)   => path
+        NbWrongMemberType(path, w, s)   => path
+        NbUnknownCellType(path, saw)    => path
+        NbUnknownOutputType(path, saw)  => path
+        NbBadCellId(path, saw)          => path
+        NbDuplicateCellId(path, id)     => path
+        NbForbiddenMember(path, member) => path
+        NbBadMimePayload(path, mime)    => path
+        NbBadBase64(path, mime)         => path
+        NbBadAttachment(path, name)     => path
+        NbBadExecutionCount(path)       => path
+        NbNotWritableAt(maj, min, why)  => ""
 
 // A short, stable name for the fault, for a metric label or a test.
 //
@@ -103,7 +137,23 @@ pub fn path_of(f: NbFault) -> Str []
 //     println(nberror.code_of(NbNotAnObject))   // not-an-object
 // ```
 pub fn code_of(f: NbFault) -> Str []
-    todo("ipynb-nv.nberror.code_of")
+    match f
+        NbNotJson(at)                   => "not-json"
+        NbNotAnObject                   => "not-an-object"
+        NbNoFormatVersion               => "no-format-version"
+        NbUnsupportedFormat(maj, min)   => "unsupported-format"
+        NbMissingMember(path, member)   => "missing-member"
+        NbWrongMemberType(path, w, s)   => "wrong-member-type"
+        NbUnknownCellType(path, saw)    => "unknown-cell-type"
+        NbUnknownOutputType(path, saw)  => "unknown-output-type"
+        NbBadCellId(path, saw)          => "bad-cell-id"
+        NbDuplicateCellId(path, id)     => "duplicate-cell-id"
+        NbForbiddenMember(path, member) => "forbidden-member"
+        NbBadMimePayload(path, mime)    => "bad-mime-payload"
+        NbBadBase64(path, mime)         => "bad-base64"
+        NbBadAttachment(path, name)     => "bad-attachment"
+        NbBadExecutionCount(path)       => "bad-execution-count"
+        NbNotWritableAt(maj, min, why)  => "not-writable-at"
 
 // Whether the fault stops the notebook being read at all.
 //
@@ -119,4 +169,20 @@ pub fn code_of(f: NbFault) -> Str []
 //     println("${nberror.is_fatal(NbNotJson(0))}")   // true
 // ```
 pub fn is_fatal(f: NbFault) -> Bool []
-    todo("ipynb-nv.nberror.is_fatal")
+    match f
+        NbNotJson(at)                      => true
+        NbNotAnObject                      => true
+        NbNoFormatVersion                  => true
+        NbUnsupportedFormat(major, minor)  => true
+        NbMissingMember(path, member)      => false
+        NbWrongMemberType(path, want, saw) => false
+        NbUnknownCellType(path, saw)       => false
+        NbUnknownOutputType(path, saw)     => false
+        NbBadCellId(path, saw)             => false
+        NbDuplicateCellId(path, id)        => false
+        NbForbiddenMember(path, member)    => false
+        NbBadMimePayload(path, mime)       => false
+        NbBadBase64(path, mime)            => false
+        NbBadAttachment(path, name)        => false
+        NbBadExecutionCount(path)          => false
+        NbNotWritableAt(major, minor, why) => false

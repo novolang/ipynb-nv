@@ -1,0 +1,1376 @@
+// ipynb_edge_tests.nv — the cases the API suite leaves open.
+//
+// WHY A SECOND SUITE.  The API suite pins the interface; this one pins
+// the SHAPE OF THE FILE, and four things here are the package's own
+// claims rather than the interface's:
+//
+//   1. what happens to a member no code in this package mentions, when
+//      a notebook is read and written back;
+//   2. the cell identifier rule at BOTH versions — 4.4 must read and
+//      write without the member, 4.5 must require it;
+//   3. each of the four output kinds, and the refusal a missing member
+//      of a kind produces; and
+//   4. the split and the join of a multiline string, with an empty line
+//      in the middle and with no trailing newline, which is where a
+//      split that dropped the empty line or invented a final one would
+//      show.
+//
+// ONE OF THESE PINS A LOSS.  The test named
+// `test_a_member_no_code_mentions_is_not_written_back` states plainly
+// that a member this package does not know is DROPPED — silently, on
+// the next save.  It is here so that a reader meets the limit as a claim
+// with a test behind it rather than as a surprise in a diff, and so that
+// changing it would be a deliberate act with a failing test to answer.
+
+use std.test
+use std.list
+use std.json
+use std.str
+use nberror
+use nbcell
+use nbnotebook
+use nbread
+use nbwrite
+use nbvalidate
+
+// A one-cell notebook at 4.5 whose `cells` array holds exactly `cell`.
+fn notebook45(cell: Str) -> Str
+    let head = "{\"cells\":["
+    let tail = "],\"metadata\":{},\"nbformat\":4,\"nbformat_minor\":5}"
+    head + cell + tail
+
+// A markdown cell that satisfies every rule of 4.5, with one more
+// member if `extra` names one.
+fn markdown_cell_text(extra: Str) -> Str
+    let head = "{\"cell_type\":\"markdown\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\""
+    let tail = extra + "}"
+    head + tail
+
+// An empty JSON object.
+fn empty_object() -> JsonValueH
+    let pairs: [(Str, JsonValueH)] = []
+    json.object(pairs)
+
+// A bundle offering one value two ways: as text and as base64.
+fn sample_bundle() -> NbMimeBundle
+    nbcell.bundle_with(
+        nbcell.bundle_with(nbcell.bundle(), "text/plain", json.string("1")),
+        "image/png", json.string("aGk="))
+
+// The four output kinds, one of each, with a stream text that has an
+// empty line in the middle and no trailing newline.
+fn four_outputs() -> [NbOutput]
+    let data = sample_bundle()
+    let md = empty_object()
+    let tb: [Str] = ["Traceback (most recent call last)", "ValueError: bad"]
+    let outs: [NbOutput] = [
+        NbStream("stdout", "one\n\ntwo"),
+        NbDisplayData(data, md),
+        NbExecuteResult(2, data, md),
+        NbErrorOutput("ValueError", "bad", tb)]
+    outs
+
+// ── The round trip, and the members no code mentions ────────────────
+
+@test
+fn test_metadata_from_a_newer_nbformat_survives_the_round_trip()
+    // 4.6 is a version no code here mentions, and the members under
+    // `metadata` belong to a newer format and to a tool this package
+    // has never heard of.  They are arbitrary JSON, they are carried
+    // untouched, and the version is carried with them.
+    let text = "{\"cells\":[],\"metadata\":{\"kernelspec\":{\"name\":\"python3\"},"
+             + "\"widgets\":{\"application/vnd.jupyter.widget-state+json\":{\"a\":1}}},"
+             + "\"nbformat\":4,\"nbformat_minor\":6}"
+    match nbread.read(text)
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(r.notebook.minor, 6)
+            test.assert_eq(nbnotebook.kernel_name(r.notebook), "python3")
+            test.assert_eq(list.len(r.issues), 0)
+            match nbwrite.write(r.notebook)
+                Err(e) => test.fail(e.message())
+                Ok(t)  =>
+                    test.assert(str.contains(t, "\"nbformat_minor\": 6"))
+                    test.assert(str.contains(t, "widget-state+json"))
+                    match nbread.read(t)
+                        Err(e2) => test.fail(e2.message())
+                        Ok(r2)  =>
+                            test.assert_eq(nbnotebook.kernel_name(r2.notebook),
+                                           "python3")
+                            test.assert_eq(list.len(r2.issues), 0)
+
+@test
+fn test_a_member_no_code_mentions_is_not_written_back()
+    // THE DOCUMENTED LOSS.  The reader recognises the four document
+    // members, a cell's own set, and an output's.  A member outside
+    // those — a newer nbformat's, another tool's — has nowhere in the
+    // model to live, so it is NOT carried: it is gone from the next
+    // save, and no issue names it, because nothing here knows it was
+    // ever there.  `metadata` and a MIME payload are the exception:
+    // they are arbitrary JSON and everything under them survives.
+    let text = "{\"cells\":[{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},"
+             + "\"outputs\":[],\"execution_count\":null,\"id\":\"a1\","
+             + "\"celltoolz\":{\"folded\":true}}],\"metadata\":{},"
+             + "\"nbformat\":4,\"nbformat_minor\":5,\"novo_unknown\":[1,2]}"
+    match nbread.read(text)
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            // Not even reported: the reader does not know they exist.
+            test.assert_eq(list.len(r.issues), 0)
+            match nbwrite.write(r.notebook)
+                Err(e) => test.fail(e.message())
+                Ok(t)  =>
+                    test.assert(not str.contains(t, "celltoolz"))
+                    test.assert(not str.contains(t, "novo_unknown"))
+
+@test
+fn test_a_bundle_payload_that_is_a_json_document_survives()
+    // A `+json` MIME type carries a JSON value, not a line-split text,
+    // and it is written back as the document it is.
+    //
+    // It is also the case where the format's schema and the real world
+    // disagree, so both halves are pinned.  The schema requires a
+    // MULTILINE STRING under every MIME type, and a charting tool that
+    // writes a JSON document under `application/vnd.plotly.v1+json`
+    // breaks that rule — so the reading reports `bad-mime-payload`,
+    // which does not block the save, and the strict reading refuses it,
+    // because the file does not satisfy its own version.  Nothing is
+    // lost either way: the document goes back out as the document it
+    // came in as, which is the whole of the reader's contract.
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":null,\"outputs\":[{\"output_type\":\"display_data\","
+             + "\"data\":{\"application/vnd.plotly.v1+json\":"
+             + "{\"data\":[{\"x\":1}],\"layout\":{}}},\"metadata\":{}}]}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 1)
+            let f = list.get(r.issues, 0)
+            test.assert_eq(nberror.code_of(f), "bad-mime-payload")
+            test.assert_eq(nberror.is_fatal(f), false)
+            // The MIME type in the path is RFC 6901-escaped, so the `/`
+            // of `application/vnd...` does not read as another step.
+            test.assert_eq(nberror.path_of(f),
+                           "/cells/0/outputs/0/data/application~1vnd.plotly.v1+json")
+            match nbwrite.write(r.notebook)
+                Err(e) => test.fail(e.message())
+                Ok(t)  =>
+                    test.assert(str.contains(t, "\"layout\": {}"))
+                    match nbread.read(t)
+                        Err(e2) => test.fail(e2.message())
+                        Ok(r2)  =>
+                            match nbnotebook.cell_at(r2.notebook, 0)
+                                None    => test.fail("the cell is there")
+                                Some(c) =>
+                                    let o = list.get(c.outputs, 0)
+                                    match o
+                                        NbDisplayData(data, md)  =>
+                                            match nbcell.bundle_get(
+                                                      data,
+                                                      "application/vnd.plotly.v1+json")
+                                                None    => test.fail("the payload is there")
+                                                Some(v) =>
+                                                    test.assert(
+                                                        str.contains(
+                                                            json.stringify(v),
+                                                            "\"x\":1"))
+                                        NbStream(n, x)           => test.fail("a display")
+                                        NbExecuteResult(n, d, m) => test.fail("a display")
+                                        NbErrorOutput(a, b, tb)  => test.fail("a display")
+    // The strict reading is the schema: a document that breaks it does
+    // not pass, even though nothing about it was lost.
+    match nbread.read_strict(notebook45(cell))
+        Ok(_)  => test.fail("the schema wants a multiline string there")
+        Err(e) => test.assert_eq(nberror.code_of(e), "bad-mime-payload")
+
+// ── The cell identifier exists from 4.5 and not before ──────────────
+
+@test
+fn test_a_4_4_file_with_no_identifier_reads_clean_and_writes_without_one()
+    // A reader that required an identifier would reject a valid 4.4
+    // document; a writer that always emitted one would break it.
+    let text = "{\"cells\":[{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},"
+             + "\"outputs\":[],\"execution_count\":null}],\"metadata\":{},"
+             + "\"nbformat\":4,\"nbformat_minor\":4}"
+    match nbread.read(text)
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 0)
+            test.assert_eq(nbnotebook.cells_without_id(r.notebook), 1)
+            match nbwrite.write(r.notebook)
+                Err(e) => test.fail(e.message())
+                Ok(t)  =>
+                    test.assert(not str.contains(t, "\"id\""))
+                    test.assert(str.contains(t, "\"nbformat_minor\": 4"))
+    // Nothing about it is wrong, so the strict reading takes it too.
+    match nbread.read_strict(text)
+        Err(e) => test.fail(e.message())
+        Ok(_)  => test.assert(true)
+
+@test
+fn test_a_4_4_file_that_carries_an_identifier_keeps_it()
+    // The other half: a 4.4 document that HAS the member keeps it,
+    // because the writer invents nothing and discards nothing a caller
+    // set.
+    let text = "{\"cells\":[{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},"
+             + "\"outputs\":[],\"execution_count\":null,\"id\":\"a1\"}],\"metadata\":{},"
+             + "\"nbformat\":4,\"nbformat_minor\":4}"
+    match nbread.read(text)
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 0)
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) => test.assert_eq(c.id, "a1")
+            match nbwrite.write(r.notebook)
+                Err(e) => test.fail(e.message())
+                Ok(t)  => test.assert(str.contains(t, "\"id\": \"a1\""))
+
+@test
+fn test_a_4_5_file_with_no_identifier_is_one_issue_and_a_refusal()
+    let text = "{\"cells\":[{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},"
+             + "\"outputs\":[],\"execution_count\":null}],\"metadata\":{},"
+             + "\"nbformat\":4,\"nbformat_minor\":5}"
+    match nbread.read(text)
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 1)
+            let f = list.get(r.issues, 0)
+            test.assert_eq(nberror.code_of(f), "missing-member")
+            test.assert_eq(nberror.path_of(f), "/cells/0/id")
+            test.assert_eq(nberror.is_fatal(f), false)
+            match nbwrite.write(r.notebook)
+                Ok(_)  => test.fail("a 4.5 cell has an identifier")
+                Err(e) =>
+                    test.assert_eq(nberror.code_of(e), "not-writable-at")
+                    // A fault that carries a value has the value pinned.
+                    test.assert(str.contains(e.message(),
+                                             "a required member is missing: id"))
+    match nbread.read_strict(text)
+        Ok(_)  => test.fail("the strict reading refuses a missing identifier")
+        Err(e) => test.assert_eq(nberror.code_of(e), "missing-member")
+
+@test
+fn test_a_4_5_notebook_written_at_4_4_loses_the_member_it_cannot_have()
+    let nb = nbnotebook.append(nbnotebook.notebook(), nbcell.code_cell("a1", "x"))
+    match nbwrite.write(nb)
+        Err(e) => test.fail(e.message())
+        Ok(t)  => test.assert(str.contains(t, "\"id\": \"a1\""))
+    match nbwrite.write_at(nb, 4, 4)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            test.assert(not str.contains(t, "\"id\""))
+            test.assert(str.contains(t, "\"nbformat_minor\": 4"))
+
+@test
+fn test_the_identifier_rule_is_the_one_4_5_added()
+    // One to sixty-four characters of letters, digits, `-` and `_`, and
+    // a rule 4.4 does not have: a 4.4 document is not told off for a
+    // name 4.5 invented, and a cell without one is only a fault at 4.5.
+    test.assert(not nbcell.is_valid_cell_id(""))
+    test.assert(not nbcell.is_valid_cell_id("has a space"))
+    test.assert(not nbcell.is_valid_cell_id(str.repeat("a", 65)))
+    test.assert(nbcell.is_valid_cell_id(str.repeat("a", 64)))
+    // The two ends of the three ranges, and the two bytes the rule adds:
+    // `Z` is a letter and `[` is not, `z` is and `{` is not, `9` is and
+    // `:` is not, and `-` and `_` are the pair nbformat adds to them.
+    test.assert(nbcell.is_valid_cell_id("Zz9_-"))
+    test.assert(not nbcell.is_valid_cell_id("a[b"))
+    test.assert(not nbcell.is_valid_cell_id("a{b"))
+    test.assert(not nbcell.is_valid_cell_id("a:b"))
+    let c = nbcell.code_cell("has a space", "x")
+    test.assert_eq(list.len(nbvalidate.check_cell(c, 4, 4)), 0)
+    let at45 = nbvalidate.check_cell(c, 4, 5)
+    test.assert_eq(list.len(at45), 1)
+    let i = list.get(at45, 0)
+    test.assert_eq(nberror.code_of(i.fault), "bad-cell-id")
+    test.assert(i.blocking)
+    // Upgrading refuses an identifier a writer would then refuse.
+    let nb44 = nbnotebook.append(nbnotebook.notebook(), nbcell.code_cell("", "x"))
+    match nbnotebook.upgraded(nb44, ["has a space"])
+        Ok(_)  => test.fail("that is not an identifier")
+        Err(e) => test.assert_eq(nberror.code_of(e), "not-writable-at")
+
+// ── An output is a union with a discriminator ───────────────────────
+
+@test
+fn test_each_of_the_four_output_kinds_round_trips()
+    let cell = nbcell.with_execution_count(
+                   nbcell.with_outputs(nbcell.code_cell("a1", "x"), four_outputs()),
+                   Some(2))
+    let nb = nbnotebook.append(nbnotebook.notebook(), cell)
+    match nbwrite.write(nb)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            match nbread.read(t)
+                Err(e) => test.fail(e.message())
+                Ok(r)  =>
+                    test.assert_eq(list.len(r.issues), 0)
+                    match nbnotebook.cell_at(r.notebook, 0)
+                        None    => test.fail("the cell is there")
+                        Some(c) =>
+                            test.assert_eq(list.len(c.outputs), 4)
+                            let o0 = list.get(c.outputs, 0)
+                            match o0
+                                NbStream(name, text)     =>
+                                    test.assert_eq(name, "stdout")
+                                    test.assert_eq(text, "one\n\ntwo")
+                                NbDisplayData(d, m)      => test.fail("a stream")
+                                NbExecuteResult(n, d, m) => test.fail("a stream")
+                                NbErrorOutput(a, b, tb)  => test.fail("a stream")
+                            let o1 = list.get(c.outputs, 1)
+                            match o1
+                                NbDisplayData(d, m)      =>
+                                    // `bundle_mimes` rather than
+                                    // `d.entries`: a field read off a
+                                    // binding in an arm whose variant
+                                    // carries a handle field is an
+                                    // internal compiler error in
+                                    // 0.20.2 — see the CHANGELOG and
+                                    // novo bug
+                                    // type-system-meta/a-field-read-off-a-binding-in-an-enum-arm-is-an-e6000-ice-when-a-sibling-field.
+                                    test.assert_eq(list.len(nbcell.bundle_mimes(d)), 2)
+                                    match nbcell.bundle_text(d, "text/plain")
+                                        None    => test.fail("the text is there")
+                                        Some(s) => test.assert_eq(s, "1")
+                                NbStream(n, x)           => test.fail("a display")
+                                NbExecuteResult(n, d, m) => test.fail("a display")
+                                NbErrorOutput(a, b, tb)  => test.fail("a display")
+                            let o2 = list.get(c.outputs, 2)
+                            match o2
+                                NbExecuteResult(count, d, m) =>
+                                    test.assert_eq(count, 2)
+                                NbStream(n, x)               => test.fail("an execute result")
+                                NbDisplayData(d, m)          => test.fail("an execute result")
+                                NbErrorOutput(a, b, tb)      => test.fail("an execute result")
+                            let o3 = list.get(c.outputs, 3)
+                            match o3
+                                NbErrorOutput(ename, evalue, traceback) =>
+                                    test.assert_eq(ename, "ValueError")
+                                    test.assert_eq(evalue, "bad")
+                                    test.assert_eq(list.len(traceback), 2)
+                                    test.assert_eq(list.get(traceback, 1),
+                                                   "ValueError: bad")
+                                NbStream(n, x)                          => test.fail("an error")
+                                NbDisplayData(d, m)                     => test.fail("an error")
+                                NbExecuteResult(n, d, m)                => test.fail("an error")
+
+@test
+fn test_a_stream_without_its_members_is_recovered_as_stdout_and_reported()
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":null,\"outputs\":[{\"output_type\":\"stream\"}]}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 2)
+            test.assert_eq(nberror.path_of(list.get(r.issues, 0)),
+                           "/cells/0/outputs/0/name")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 1)),
+                           "/cells/0/outputs/0/text")
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) =>
+                    let o = list.get(c.outputs, 0)
+                    match o
+                        NbStream(name, text)     =>
+                            test.assert_eq(name, "stdout")
+                            test.assert_eq(text, "")
+                        NbDisplayData(d, m)      => test.fail("a stream")
+                        NbExecuteResult(n, d, m) => test.fail("a stream")
+                        NbErrorOutput(a, b, tb)  => test.fail("a stream")
+
+@test
+fn test_a_display_without_its_bundle_is_two_issues_and_a_refusal()
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":null,\"outputs\":[{\"output_type\":\"display_data\"}]}"
+    let text = notebook45(cell)
+    match nbread.read(text)
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 2)
+            test.assert_eq(nberror.path_of(list.get(r.issues, 0)),
+                           "/cells/0/outputs/0/data")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 1)),
+                           "/cells/0/outputs/0/metadata")
+    match nbread.read_strict(text)
+        Ok(_)  => test.fail("a display with no data is not a valid notebook")
+        Err(e) => test.assert_eq(nberror.code_of(e), "missing-member")
+
+@test
+fn test_an_execute_result_without_its_count_or_bundle_is_three_issues()
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":null,\"outputs\":[{\"output_type\":\"execute_result\"}]}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 3)
+            test.assert_eq(nberror.code_of(list.get(r.issues, 0)),
+                           "bad-execution-count")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 0)),
+                           "/cells/0/outputs/0/execution_count")
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) =>
+                    let o = list.get(c.outputs, 0)
+                    match o
+                        NbExecuteResult(count, d, m) => test.assert_eq(count, 0)
+                        NbStream(n, x)               => test.fail("an execute result")
+                        NbDisplayData(d, m)          => test.fail("an execute result")
+                        NbErrorOutput(a, b, tb)      => test.fail("an execute result")
+
+@test
+fn test_an_error_without_its_members_is_three_issues()
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":null,\"outputs\":[{\"output_type\":\"error\"}]}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 3)
+            test.assert_eq(nberror.path_of(list.get(r.issues, 0)),
+                           "/cells/0/outputs/0/ename")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 1)),
+                           "/cells/0/outputs/0/evalue")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 2)),
+                           "/cells/0/outputs/0/traceback")
+
+@test
+fn test_a_kind_is_never_asked_for_a_member_it_cannot_have()
+    // An error has no `data`, a stream has no `ename`, a display has no
+    // `execution_count`.  A reader that read one anyway would report a
+    // fault in a file nbformat accepts.
+    test.assert_eq(list.len(nbvalidate.check_output(
+                                NbErrorOutput("E", "v", ["t"]), 4, 5)),
+                                0)
+    test.assert_eq(list.len(nbvalidate.check_output(
+                                NbStream("stderr", "x"), 4, 5)),
+                                0)
+    test.assert_eq(list.len(nbvalidate.check_output(
+                                NbDisplayData(nbcell.bundle(), empty_object()),
+                                4, 5)),
+                                0)
+    test.assert_eq(list.len(nbvalidate.check_output(
+                                NbExecuteResult(0, nbcell.bundle(), empty_object()),
+                                4, 5)),
+                                0)
+    // And a whole file of one error output opens with nothing said.
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":1,\"outputs\":[{\"output_type\":\"error\","
+             + "\"ename\":\"E\",\"evalue\":\"v\",\"traceback\":[\"t\"]}]}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  => test.assert_eq(list.len(r.issues), 0)
+
+@test
+fn test_an_output_of_the_wrong_shape_reads_as_none_and_is_reported()
+    // Not an object at all.
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":null,\"outputs\":[5]}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 1)
+            test.assert_eq(nberror.code_of(list.get(r.issues, 0)),
+                           "wrong-member-type")
+    match json.parse("5")
+        None    => test.fail("that is JSON")
+        Some(j) =>
+            match nbread.read_output(j)
+                Some(_) => test.fail("a number is not an output")
+                None    => test.assert(true)
+    // A discriminator of the wrong type names no kind.
+    match json.parse("{\"output_type\":7}")
+        None    => test.fail("that is JSON")
+        Some(j) =>
+            match nbread.read_output(j)
+                Some(_) => test.fail("7 names no output type")
+                None    => test.assert(true)
+
+// ── The lines of a source, and of a stream's text ───────────────────
+
+@test
+fn test_a_source_with_an_empty_line_in_the_middle_round_trips_exactly()
+    // The join is `""`: an array joined with newlines instead would
+    // double every newline already in each line, and a split that
+    // dropped the empty line would shorten the cell.
+    let src = "a\n\nb"
+    let ls = nbcell.split_lines(src)
+    test.assert_eq(list.len(ls), 3)
+    test.assert_eq(list.get(ls, 0), "a\n")
+    test.assert_eq(list.get(ls, 1), "\n")
+    test.assert_eq(list.get(ls, 2), "b")
+    test.assert_eq(nbcell.join_lines(ls), src)
+    let nb = nbnotebook.append(nbnotebook.notebook(), nbcell.code_cell("a1", src))
+    match nbwrite.write(nb)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            match nbread.read(t)
+                Err(e) => test.fail(e.message())
+                Ok(r)  =>
+                    match nbnotebook.cell_at(r.notebook, 0)
+                        None    => test.fail("the cell is there")
+                        Some(c) => test.assert_eq(c.source, src)
+
+@test
+fn test_a_source_with_no_trailing_newline_is_not_given_one()
+    // The last line keeps no newline, so the join is exact.  A writer
+    // that appended one would change the meaning of a cell whose last
+    // statement is an expression.
+    let src = "print(1)"
+    test.assert_eq(list.len(nbcell.split_lines(src)), 1)
+    test.assert_eq(nbcell.join_lines(nbcell.split_lines(src)), src)
+    test.assert_eq(list.len(nbcell.split_lines("")), 0)
+    let cell = nbcell.with_execution_count(nbcell.code_cell("a1", src), None)
+    match nbwrite.write_cell(cell)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            test.assert(str.contains(t, "\"print(1)\""))
+            test.assert(str.contains(t, "\"execution_count\": null"))
+
+@test
+fn test_a_stream_text_with_an_empty_line_round_trips_exactly()
+    let text = "x\n\ny\n"
+    let ls = nbcell.split_lines(text)
+    test.assert_eq(list.len(ls), 3)
+    test.assert_eq(nbcell.join_lines(ls), text)
+    let cell = nbcell.with_outputs(nbcell.code_cell("a1", "print()"),
+                                   [NbStream("stdout", text)])
+    match nbwrite.write_cell(cell)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            test.assert(str.contains(t, "\"x\\n\""))
+            let back = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},"
+                     + "\"id\":\"a1\",\"execution_count\":null,\"outputs\":"
+                     + "[{\"output_type\":\"stream\",\"name\":\"stdout\","
+                     + "\"text\":[\"x\\n\",\"\\n\",\"y\\n\"]}]}"
+            match nbread.read(notebook45(back))
+                Err(e) => test.fail(e.message())
+                Ok(r)  =>
+                    test.assert_eq(list.len(r.issues), 0)
+                    match nbnotebook.cell_at(r.notebook, 0)
+                        None    => test.fail("the cell is there")
+                        Some(c) => test.assert_eq(nbcell.stdout_text(c), text)
+
+// ── The reader's recoveries, one member at a time ───────────────────
+
+@test
+fn test_a_notebook_missing_its_metadata_and_cells_recovers_with_two_issues()
+    match nbread.read("{\"nbformat\":4}")
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 2)
+            test.assert_eq(nberror.path_of(list.get(r.issues, 0)), "/metadata")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 1)), "/cells")
+            test.assert_eq(nbnotebook.cell_count(r.notebook), 0)
+            test.assert_eq(json.stringify(r.notebook.metadata), "{}")
+    match nbread.read("{\"nbformat\":4,\"metadata\":[],\"cells\":{}}")
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 2)
+            test.assert_eq(nberror.code_of(list.get(r.issues, 0)),
+                           "wrong-member-type")
+            test.assert_eq(nbnotebook.kernel_name(r.notebook), "")
+
+@test
+fn test_a_cell_of_mistyped_members_is_recovered_member_by_member()
+    // Five recoveries, each reported at its own member, and one shape
+    // rule: the identifier the reader kept is the empty one, which 4.5
+    // refuses.
+    let cell = "{\"cell_type\":\"code\",\"source\":7,\"metadata\":[1],\"outputs\":5,"
+             + "\"execution_count\":\"x\",\"id\":7}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 6)
+            test.assert_eq(nberror.path_of(list.get(r.issues, 0)), "/cells/0/source")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 1)), "/cells/0/metadata")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 2)), "/cells/0/id")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 3)), "/cells/0/outputs")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 4)),
+                           "/cells/0/execution_count")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 5)), "/cells/0/id")
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) =>
+                    test.assert_eq(c.source, "")
+                    test.assert_eq(c.id, "")
+                    test.assert_eq(json.stringify(c.metadata), "{}")
+                    test.assert_eq(list.len(c.outputs), 0)
+                    match c.execution_count
+                        Some(_) => test.fail("it never ran")
+                        None    => test.assert(true)
+
+@test
+fn test_a_count_that_is_not_an_integer_is_recovered_as_never_run()
+    // A JSON null is the documented spelling of "has not run" and is not
+    // an issue; a value of another type is, because the model keeps only
+    // one of those.
+    let base = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":null,\"outputs\":[]}"
+    let cell = str.replace(base, "\"execution_count\":null",
+                           "\"execution_count\":1.5")
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 1)
+            test.assert_eq(nberror.code_of(list.get(r.issues, 0)),
+                           "bad-execution-count")
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) =>
+                    match c.execution_count
+                        Some(_) => test.fail("1.5 is not a count")
+                        None    => test.assert(true)
+
+@test
+fn test_a_traceback_line_that_is_not_a_string_is_reported_where_it_is()
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":1,\"outputs\":[{\"output_type\":\"error\","
+             + "\"ename\":\"E\",\"evalue\":\"v\",\"traceback\":[\"t\",7]}]}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 1)
+            test.assert_eq(nberror.path_of(list.get(r.issues, 0)),
+                           "/cells/0/outputs/0/traceback/1")
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) =>
+                    let o = list.get(c.outputs, 0)
+                    match o
+                        NbErrorOutput(ename, evalue, traceback) =>
+                            test.assert_eq(list.len(traceback), 1)
+                        NbStream(n, x)                          => test.fail("an error")
+                        NbDisplayData(d, m)                     => test.fail("an error")
+                        NbExecuteResult(n, d, m)                => test.fail("an error")
+
+@test
+fn test_a_markdown_cells_attachments_are_read_and_their_faults_reported()
+    let good = markdown_cell_text(
+                   ",\"attachments\":{\"p.png\":{\"image/png\":\"aGk=\"}}")
+    match nbread.read(notebook45(good))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 0)
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) =>
+                    test.assert_eq(list.len(c.attachments), 1)
+                    let a = list.get(c.attachments, 0)
+                    test.assert_eq(a.name, "p.png")
+                    match nbcell.bundle_bytes(a.data, "image/png")
+                        None    => test.fail("aGk= is base64")
+                        Some(_) => test.assert(true)
+    // A bundle under a name that is not an object is a bad attachment.
+    let bad = ",\"attachments\":{\"p.png\":5}"
+    match nbread.read(notebook45(markdown_cell_text(bad)))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 1)
+            test.assert_eq(nberror.code_of(list.get(r.issues, 0)), "bad-attachment")
+    // The member itself not being an object is a wrong type.
+    match nbread.read(notebook45(markdown_cell_text(",\"attachments\":5")))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 1)
+            test.assert_eq(nberror.code_of(list.get(r.issues, 0)),
+                           "wrong-member-type")
+
+@test
+fn test_a_cell_read_on_its_own_from_the_wrong_shape_is_none()
+    match json.parse("5")
+        None    => test.fail("that is JSON")
+        Some(j) =>
+            match nbread.read_cell(j)
+                Some(_) => test.fail("a number is not a cell")
+                None    => test.assert(true)
+    match json.parse("{\"source\":\"x\"}")
+        None    => test.fail("that is JSON")
+        Some(j) =>
+            match nbread.read_cell(j)
+                Some(_) => test.fail("a cell names its type")
+                None    => test.assert(true)
+
+// ── The rules, the writer and the accessors ─────────────────────────
+
+@test
+fn test_a_cell_kind_may_not_carry_another_kinds_members()
+    let md = nbcell.with_outputs(nbcell.markdown_cell("a1", "x"),
+                                 [NbStream("stdout", "x")])
+    let issues = nbvalidate.check_cell(md, 4, 5)
+    test.assert_eq(list.len(issues), 1)
+    let i = list.get(issues, 0)
+    test.assert_eq(nberror.code_of(i.fault), "forbidden-member")
+    test.assert(i.blocking)
+    let counted = nbcell.with_execution_count(nbcell.markdown_cell("a1", "x"), Some(1))
+    test.assert_eq(list.len(nbvalidate.check_cell(counted, 4, 5)), 1)
+    let attached = nbcell.with_attachment(nbcell.code_cell("a1", "x"),
+                                          nbcell.attachment("p.png", nbcell.bundle()))
+    test.assert_eq(list.len(nbvalidate.check_cell(attached, 4, 5)), 1)
+    // Blocking means the writer refuses, and this is why.
+    match nbwrite.write_cell(attached)
+        Ok(_)  => test.fail("a code cell may not carry attachments")
+        Err(e) => test.assert_eq(nberror.code_of(e), "not-writable-at")
+
+@test
+fn test_a_duplicate_identifier_is_not_a_rule_below_4_5()
+    match nbnotebook.notebook_at(4, 4)
+        Err(e)    => test.fail(e.message())
+        Ok(empty) =>
+            let nb = nbnotebook.append(
+                         nbnotebook.append(empty, nbcell.code_cell("a1", "x")),
+                         nbcell.code_cell("a1", "y"))
+            test.assert_eq(list.len(nbvalidate.check_at(nb, 4, 4)), 0)
+            let at45 = nbvalidate.check_at(nb, 4, 5)
+            test.assert_eq(list.len(at45), 1)
+            let i = list.get(at45, 0)
+            test.assert_eq(nberror.code_of(i.fault), "duplicate-cell-id")
+            test.assert(not i.blocking)
+            // The lookup is what the rule is for, and it answers one.
+            match nbnotebook.index_of(nb, "a1")
+                None     => test.fail("a1 is there")
+                Some(at) => test.assert_eq(at, 0)
+            test.assert_eq(list.len(nbnotebook.duplicate_ids(nb)), 1)
+
+@test
+fn test_the_validator_reports_a_metadata_that_is_not_an_object()
+    let nb = nbnotebook.with_metadata(nbnotebook.notebook(), json.int(1))
+    let issues = nbvalidate.check(nb)
+    test.assert_eq(list.len(issues), 1)
+    let i = list.get(issues, 0)
+    test.assert_eq(i.path, "/metadata")
+    test.assert_eq(nberror.code_of(i.fault), "wrong-member-type")
+    test.assert(i.blocking)
+    // An output's metadata is a rule of its own.
+    let o = nbvalidate.check_output(NbDisplayData(nbcell.bundle(), json.int(1)), 4, 5)
+    test.assert_eq(list.len(o), 1)
+    test.assert_eq(list.get(o, 0).path, "/metadata")
+    test.assert(list.get(o, 0).blocking)
+    // And a notebook of another major version is refused as a whole.
+    let alien = NbNotebook { major: 3, minor: 0, metadata: empty_object(), cells: [] }
+    match nbwrite.to_json(alien)
+        Ok(_)  => test.fail("version 3 is a different format")
+        Err(e) => test.assert_eq(nberror.code_of(e), "unsupported-format")
+    match nbwrite.write(alien)
+        Ok(_)  => test.fail("version 3 is a different format")
+        Err(e) => test.assert_eq(nberror.code_of(e), "unsupported-format")
+    let alien_issues = nbvalidate.check(alien)
+    test.assert_eq(list.len(alien_issues), 1)
+    let ai = list.get(alien_issues, 0)
+    test.assert_eq(ai.path, "")
+    test.assert_eq(nberror.code_of(ai.fault), "unsupported-format")
+    test.assert(not str.starts_with(nbvalidate.issue_text(ai), ":"))
+
+@test
+fn test_a_bundle_payload_of_the_wrong_shape_names_and_escapes_its_mime_type()
+    // A MIME type has a `/` in it, and RFC 6901's escape is what keeps
+    // the pointer naming a member that exists.  `~` goes first.
+    let plain = nbcell.bundle_with(nbcell.bundle(), "text/plain", json.int(1))
+    let issues = nbvalidate.check_bundle(plain)
+    test.assert_eq(list.len(issues), 1)
+    let i = list.get(issues, 0)
+    test.assert_eq(i.path, "/text~1plain")
+    test.assert_eq(nberror.code_of(i.fault), "bad-mime-payload")
+    test.assert(not i.blocking)
+    // A `text/plain` written as an array with a number in it is not a
+    // multiline string either.
+    let mixed = nbcell.bundle_with(nbcell.bundle(), "text/plain",
+                                   json.array([json.int(1)]))
+    test.assert_eq(list.len(nbvalidate.check_bundle(mixed)), 1)
+    // And an attachment name with both characters escapes both.
+    let a = nbcell.attachment("a~b/c",
+                              nbcell.bundle_with(nbcell.bundle(), "image/png",
+                                                 json.string("!!!")))
+    let md = nbcell.with_attachment(nbcell.markdown_cell("a1", "x"), a)
+    let att_issues = nbvalidate.check_cell(md, 4, 5)
+    test.assert_eq(list.len(att_issues), 1)
+    let j = list.get(att_issues, 0)
+    test.assert_eq(j.path, "/attachments/a~0b~1c/image~1png")
+    test.assert_eq(nberror.code_of(j.fault), "bad-base64")
+    // An empty attachment name is named, and valid base64 is not.
+    let nameless = nbcell.with_attachment(nbcell.markdown_cell("a1", "x"),
+                                          nbcell.attachment("", nbcell.bundle()))
+    let named = nbvalidate.check_cell(nameless, 4, 5)
+    test.assert_eq(list.len(named), 1)
+    test.assert_eq(nberror.code_of(list.get(named, 0).fault), "bad-attachment")
+    let good = nbcell.bundle_with(nbcell.bundle(), "image/png", json.string("aGk="))
+    test.assert_eq(list.len(nbvalidate.check_bundle(good)), 0)
+    match nbcell.bundle_bytes(good, "image/png")
+        None    => test.fail("aGk= is base64")
+        Some(_) => test.assert(true)
+
+@test
+fn test_the_writer_splits_a_text_payload_and_leaves_a_json_one_alone()
+    // A `text/*` payload is a multiline string and is written as lines;
+    // an `application/json` payload is the document itself and is not.
+    // EVERY `text/*` type and not only `text/plain`: a `text/html` a
+    // table carries beside its `text/plain` is the same multiline
+    // string and is written the same way.
+    let b = nbcell.bundle_with(
+                nbcell.bundle_with(
+                    nbcell.bundle_with(nbcell.bundle(), "text/plain",
+                                       json.string("a\nb")),
+                    "text/html", json.string("<b>1</b>")),
+                "application/json", empty_object())
+    let cell = nbcell.with_outputs(nbcell.code_cell("a1", "x"),
+                                   [NbDisplayData(b, empty_object())])
+    match nbwrite.write_cell(cell)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            test.assert(str.contains(t, "\"a\\n\""))
+            test.assert(str.contains(t, "\"application/json\""))
+            test.assert(str.contains(t, "\"text/plain\": ["))
+            test.assert(str.contains(t, "\"text/html\": ["))
+
+@test
+fn test_the_writer_writes_the_canonical_bytes_of_a_notebook_with_a_cell()
+    // THE FOUR CHOICES, ON A DOCUMENT THAT HAS SOMETHING TO SORT AND
+    // SOMETHING TO INDENT.  The notebook the API suite drives its
+    // `is_canonical` assertions with is empty, so it has no nested
+    // object at all and can say nothing about either choice; this is
+    // the file a caller actually gets, to the byte.  The source is
+    // `one\n\ntwo`, which is the split with an empty line in the middle
+    // and no trailing newline, written as the array of lines the format
+    // calls for.
+    let cell = nbcell.with_execution_count(
+                   nbcell.with_outputs(nbcell.code_cell("a1", "one\n\ntwo"),
+                                       [NbStream("stdout", "hi")]),
+                   Some(1))
+    let nb = nbnotebook.append(nbnotebook.notebook(), cell)
+    let lines: [Str] = [
+        "{",
+        " \"cells\": [",
+        "  {",
+        "   \"cell_type\": \"code\",",
+        "   \"execution_count\": 1,",
+        "   \"id\": \"a1\",",
+        "   \"metadata\": {},",
+        "   \"outputs\": [",
+        "    {",
+        "     \"name\": \"stdout\",",
+        "     \"output_type\": \"stream\",",
+        "     \"text\": [",
+        "      \"hi\"",
+        "     ]",
+        "    }",
+        "   ],",
+        "   \"source\": [",
+        "    \"one\\n\",",
+        "    \"\\n\",",
+        "    \"two\"",
+        "   ]",
+        "  }",
+        " ],",
+        " \"metadata\": {},",
+        " \"nbformat\": 4,",
+        " \"nbformat_minor\": 5",
+        "}"]
+    match nbwrite.write(nb)
+        Err(e) => test.fail(e.message())
+        Ok(t)  => test.assert_eq(t, list.join(lines, "\n") + "\n")
+
+@test
+fn test_a_version_that_is_not_four_is_refused_by_the_numbers_it_was_given()
+    // The refusal carries both numbers, each where it belongs.  A
+    // message that named them the other way round would send a caller
+    // looking for a 5.0 document when the file says 5.0 is a 0.5 one.
+    match nbread.read("{\"cells\":[],\"nbformat\":5,\"nbformat_minor\":0}")
+        Ok(_)  => test.fail("5 is not a format this package reads")
+        Err(e) =>
+            test.assert_eq(nberror.code_of(e), "unsupported-format")
+            test.assert(str.contains(e.message(), "5.0"))
+    match nbread.read("{\"cells\":[],\"nbformat\":3,\"nbformat_minor\":7}")
+        Ok(_)  => test.fail("3 is a different document")
+        Err(e) => test.assert(str.contains(e.message(), "3.7"))
+
+@test
+fn test_a_markdown_cell_writes_its_attachments_and_an_empty_one_writes_none()
+    let a = nbcell.attachment("p.png",
+                              nbcell.bundle_with(nbcell.bundle(), "image/png",
+                                                 json.string("aGk=")))
+    let with = nbcell.with_attachment(nbcell.markdown_cell("a1", "x"), a)
+    match nbwrite.write_cell(with)
+        Err(e) => test.fail(e.message())
+        Ok(t)  =>
+            test.assert(str.contains(t, "\"attachments\""))
+            test.assert(str.contains(t, "\"p.png\""))
+    match nbwrite.write_cell(nbcell.markdown_cell("a1", "x"))
+        Err(e) => test.fail(e.message())
+        Ok(t)  => test.assert(not str.contains(t, "attachments"))
+    // A cell whose `attachments` member is PRESENT and empty comes back
+    // without it: the model cannot hold the difference between an empty
+    // object and an absent member, so the member is not invented back.
+    match nbread.read(notebook45(markdown_cell_text(",\"attachments\":{}")))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 0)
+            match nbwrite.write(r.notebook)
+                Err(e) => test.fail(e.message())
+                Ok(t)  => test.assert(not str.contains(t, "attachments"))
+
+@test
+fn test_the_canonical_form_refuses_text_that_is_not_a_notebook()
+    match nbwrite.canonicalise("nope")
+        Ok(_)  => test.fail("that is not JSON")
+        Err(e) => test.assert_eq(nberror.code_of(e), "not-json")
+    test.assert(not nbwrite.is_canonical("nope"))
+    match nbwrite.canonicalise("{\"nbformat\":3}")
+        Ok(_)  => test.fail("version 3 is a different format")
+        Err(e) => test.assert_eq(nberror.code_of(e), "unsupported-format")
+    match nbread.format_version("nope")
+        Ok(_)  => test.fail("that is not JSON")
+        Err(e) => test.assert_eq(nberror.code_of(e), "not-json")
+    match nbread.read_json(json.int(1))
+        Ok(_)  => test.fail("the top level is an object")
+        Err(e) => test.assert_eq(nberror.code_of(e), "not-an-object")
+
+@test
+fn test_a_position_outside_the_document_leaves_it_alone()
+    let nb = nbnotebook.append(nbnotebook.notebook(), nbcell.code_cell("a1", "x"))
+    // Insert clamps: a negative position is the front, one past the end
+    // appends.
+    let front = nbnotebook.insert(nb, -5, nbcell.raw_cell("z0", "raw"))
+    match nbnotebook.cell_at(front, 0)
+        None    => test.fail("there are two")
+        Some(c) => test.assert_eq(c.id, "z0")
+    let back = nbnotebook.insert(nb, 99, nbcell.raw_cell("z1", "raw"))
+    match nbnotebook.cell_at(back, 1)
+        None    => test.fail("there are two")
+        Some(c) => test.assert_eq(c.id, "z1")
+    // Replace and remove have nothing to do and do it.
+    let wild = nbnotebook.replace_at(nb, 5, nbcell.raw_cell("z2", "raw"))
+    test.assert_eq(nbnotebook.cell_count(wild), 1)
+    test.assert_eq(nbnotebook.cell_count(nbnotebook.remove_at(nb, -1)), 1)
+    test.assert_eq(nbnotebook.cell_count(nbnotebook.remove_at(nb, 9)), 1)
+    let rep = nbnotebook.replace_at(nb, 0, nbcell.code_cell("a1", "y"))
+    match nbnotebook.cell_at(rep, 0)
+        None    => test.fail("there is one")
+        Some(c) => test.assert_eq(c.source, "y")
+
+@test
+fn test_a_lookup_for_a_name_that_is_not_there_finds_nothing()
+    let nb = nbnotebook.append(nbnotebook.notebook(), nbcell.code_cell("", "x"))
+    // The empty string is not an identifier, so it finds nothing: the
+    // first cell with no name would make a lookup for a missing one
+    // look like a hit.
+    match nbnotebook.index_of(nb, "")
+        Some(_) => test.fail("the empty string is not an identifier")
+        None    => test.assert(true)
+    match nbnotebook.index_of(nb, "nope")
+        Some(_) => test.fail("no cell has that name")
+        None    => test.assert(true)
+    match nbnotebook.cell_by_id(nb, "nope")
+        Some(_) => test.fail("no cell has that name")
+        None    => test.assert(true)
+    test.assert_eq(list.len(nbnotebook.duplicate_ids(nb)), 0)
+
+@test
+fn test_a_metadata_member_of_the_wrong_shape_names_nothing()
+    match json.parse("{\"kernelspec\":{\"name\":7},\"language_info\":\"python\"}")
+        None     => test.fail("that is JSON")
+        Some(md) =>
+            let nb = nbnotebook.with_metadata(nbnotebook.notebook(), md)
+            test.assert_eq(nbnotebook.kernel_name(nb), "")
+            test.assert_eq(nbnotebook.language_name(nb), "")
+
+@test
+fn test_a_bundle_accessor_answers_none_for_what_is_not_there()
+    let jsonish = nbcell.bundle_with(nbcell.bundle(), "application/json",
+                                     empty_object())
+    match nbcell.bundle_get(jsonish, "text/plain")
+        Some(_) => test.fail("there is no text here")
+        None    => test.assert(true)
+    match nbcell.bundle_text(jsonish, "text/plain")
+        Some(_) => test.fail("there is no text here")
+        None    => test.assert(true)
+    // A JSON payload is a value and not a text, and neither is an array
+    // with something other than strings in it.
+    match nbcell.bundle_text(jsonish, "application/json")
+        Some(_) => test.fail("a JSON value is not text")
+        None    => test.assert(true)
+    let mixed = nbcell.bundle_with(nbcell.bundle(), "text/plain",
+                                   json.array([json.int(1)]))
+    match nbcell.bundle_text(mixed, "text/plain")
+        Some(_) => test.fail("[1] is not a multiline string")
+        None    => test.assert(true)
+    match nbcell.bundle_bytes(jsonish, "image/png")
+        Some(_) => test.fail("there is no image here")
+        None    => test.assert(true)
+    let number = nbcell.bundle_with(nbcell.bundle(), "image/png", json.int(1))
+    match nbcell.bundle_bytes(number, "image/png")
+        Some(_) => test.fail("a number is not base64 text")
+        None    => test.assert(true)
+
+@test
+fn test_stdout_is_named_and_an_error_lookup_on_a_quiet_cell_finds_nothing()
+    let c = nbcell.with_outputs(nbcell.code_cell("a1", "x"),
+                                [NbStream("stderr", "warning\n"),
+                                 NbStream("stdout", "ok\n")])
+    test.assert_eq(nbcell.stdout_text(c), "ok\n")
+    match nbcell.first_error(c)
+        Some(_) => test.fail("nothing failed")
+        None    => test.assert(true)
+    let failed = nbcell.with_outputs(nbcell.code_cell("a1", "x"),
+                                     [NbDisplayData(nbcell.bundle(), empty_object()),
+                                      NbErrorOutput("E", "v", [])])
+    match nbcell.first_error(failed)
+        None    => test.fail("that cell failed")
+        Some(n) => test.assert_eq(n, "E")
+
+@test
+fn test_every_fault_renders_a_sentence_a_code_and_a_fatality()
+    // Sixteen reasons, one arm each: the code is the metric label, the
+    // sentence is what a user reads, and four of them mean there is no
+    // document at all.
+    let faults: [NbFault] = [
+        NbNotJson(0),
+        NbNotAnObject,
+        NbNoFormatVersion,
+        NbUnsupportedFormat(4, 9),
+        NbMissingMember("/cells/0", "id"),
+        NbWrongMemberType("/cells/0/id", "a string", "number"),
+        NbUnknownCellType("/cells/0", "sketch"),
+        NbUnknownOutputType("/cells/0/outputs/0", "hologram"),
+        NbBadCellId("/cells/0/id", "has a space"),
+        NbDuplicateCellId("/cells/1/id", "a1"),
+        NbForbiddenMember("/cells/1/outputs", "outputs"),
+        NbBadMimePayload("/cells/0/outputs/0/data/text~1plain", "text/plain"),
+        NbBadBase64("/cells/0/outputs/0/data/image~1png", "image/png"),
+        NbBadAttachment("/cells/0/attachments/p.png", ""),
+        NbBadExecutionCount("/cells/0/outputs/0/execution_count"),
+        NbNotWritableAt(4, 5, "one cell has no identifier")]
+    test.assert_eq(list.len(faults), 16)
+    var fatal = 0
+    for f in faults
+        test.assert(str.len(nberror.code_of(f)) > 0)
+        test.assert(str.len(f.message()) > 0)
+        if nberror.is_fatal(f)
+            fatal = fatal + 1
+    test.assert_eq(fatal, 4)
+    test.assert(nberror.is_fatal(NbNotJson(0)))
+    test.assert(nberror.is_fatal(NbNotAnObject))
+    test.assert(nberror.is_fatal(NbNoFormatVersion))
+    test.assert(nberror.is_fatal(NbUnsupportedFormat(4, 9)))
+    test.assert_eq(nberror.path_of(NbUnsupportedFormat(4, 9)), "")
+    test.assert_eq(nberror.path_of(NbNotJson(0)), "")
+    test.assert_eq(nberror.path_of(NbMissingMember("/cells/0", "id")), "/cells/0")
+    test.assert_eq(nberror.path_of(NbNotWritableAt(4, 5, "x")), "")
+    // And every arm's path, not only the ones that answer "": the four
+    // document-level faults have no position, and the rest answer
+    // exactly the pointer they were built with.
+    let paths: [Str] = ["", "", "", "",
+                        "/cells/0", "/cells/0/id", "/cells/0",
+                        "/cells/0/outputs/0", "/cells/0/id", "/cells/1/id",
+                        "/cells/1/outputs",
+                        "/cells/0/outputs/0/data/text~1plain",
+                        "/cells/0/outputs/0/data/image~1png",
+                        "/cells/0/attachments/p.png",
+                        "/cells/0/outputs/0/execution_count", ""]
+    test.assert_eq(list.len(paths), 16)
+    var at = 0
+    for f in faults
+        test.assert_eq(nberror.path_of(f), list.get(paths, at))
+        at = at + 1
+    test.assert_eq(nberror.code_of(NbNotAnObject), "not-an-object")
+    test.assert_eq(nberror.code_of(NbBadCellId("/cells/0/id", "x")), "bad-cell-id")
+    test.assert_eq(nberror.code_of(NbDuplicateCellId("/cells/1/id", "a1")),
+                   "duplicate-cell-id")
+    test.assert_eq(nberror.code_of(NbBadMimePayload("/d/text~1plain", "text/plain")),
+                   "bad-mime-payload")
+    test.assert_eq(nberror.code_of(NbBadBase64("/d/image~1png", "image/png")),
+                   "bad-base64")
+    test.assert_eq(nberror.code_of(NbBadAttachment("/a/p.png", "p.png")),
+                   "bad-attachment")
+    test.assert_eq(nberror.code_of(NbNotWritableAt(4, 5, "x")), "not-writable-at")
+    test.assert_eq(nberror.code_of(NbUnsupportedFormat(4, 9)),
+                   "unsupported-format")
+    test.assert_eq(nberror.code_of(NbUnknownCellType("/cells/0", "x")),
+                   "unknown-cell-type")
+    test.assert_eq(nberror.code_of(NbUnknownOutputType("/cells/0/outputs/0", "x")),
+                   "unknown-output-type")
+    test.assert_eq(nberror.code_of(NbForbiddenMember("/cells/1/outputs", "outputs")),
+                   "forbidden-member")
+    test.assert_eq(nberror.code_of(NbBadExecutionCount("/c/e")),
+                   "bad-execution-count")
+    test.assert_eq(nberror.code_of(NbMissingMember("/cells/0", "id")),
+                   "missing-member")
+    test.assert_eq(nberror.code_of(NbWrongMemberType("/c", "a", "b")),
+                   "wrong-member-type")
+    test.assert_eq(nberror.code_of(NbNoFormatVersion), "no-format-version")
+    test.assert_eq(nberror.code_of(NbNotJson(0)), "not-json")
+    // A fault whose sentence carries a value has the value pinned.
+    test.assert(str.contains(NbUnsupportedFormat(4, 9).message(), "4.9"))
+    test.assert(str.contains(NbBadCellId("/cells/0/id", "has a space").message(),
+                             "one to sixty-four"))
+    test.assert(str.contains(NbDuplicateCellId("/cells/1/id", "a1").message(),
+                             "a1"))
+
+// ── The arms the two suites did not reach ───────────────────────────
+//
+// Each of these closes a line the coverage gate named.  They are pins
+// first and coverage second: an accessor's other answer, a recovery
+// for the third shape a member can have, and the two refusals that
+// happen before a document is rendered.
+
+@test
+fn test_a_cell_that_is_not_a_stdout_stream_has_no_stdout_text()
+    // `stdout_text` answers a stderr stream with nothing, and an output
+    // that is not a stream at all with nothing: `name == "stdout"` is
+    // the whole of its question.
+    let stderr_only = nbcell.with_outputs(nbcell.code_cell("a1", "x"),
+                                          [NbStream("stderr", "boom")])
+    test.assert_eq(nbcell.stdout_text(stderr_only), "")
+    let display_only = nbcell.with_outputs(nbcell.code_cell("a1", "x"),
+                                           [NbDisplayData(sample_bundle(), empty_object())])
+    test.assert_eq(nbcell.stdout_text(display_only), "")
+
+@test
+fn test_upgrading_leaves_an_identifier_that_is_already_there_alone()
+    // Only the cells that have none consume a fresh identifier, so a
+    // notebook that is already complete upgrades with an empty list.
+    let nb = nbnotebook.with_cells(nbnotebook.notebook(), [nbcell.code_cell("a1", "x")])
+    match nbnotebook.upgraded(nb, [])
+        Err(e) => test.fail(e.message())
+        Ok(up) =>
+            test.assert_eq(up.minor, 5)
+            match nbnotebook.cell_at(up, 0)
+                None    => test.fail("the cell is there")
+                Some(c) => test.assert_eq(c.id, "a1")
+
+@test
+fn test_upgrading_gives_each_cell_the_identifier_the_caller_handed_it()
+    // Two cells with none and two identifiers: one each, in the order
+    // they were given.  Handing every cell the first one would make
+    // the upgraded notebook fail its own duplicate rule the moment it
+    // was written, which is the one thing the identifiers exist to
+    // prevent.
+    let nb = nbnotebook.with_cells(nbnotebook.notebook(),
+                                   [nbcell.code_cell("", "a"),
+                                    nbcell.code_cell("", "b")])
+    test.assert_eq(nbnotebook.cells_without_id(nb), 2)
+    match nbnotebook.upgraded(nb, ["x1", "x2"])
+        Err(e) => test.fail(e.message())
+        Ok(up) =>
+            match nbnotebook.cell_at(up, 0)
+                None    => test.fail("the first cell is there")
+                Some(c) => test.assert_eq(c.id, "x1")
+            match nbnotebook.cell_at(up, 1)
+                None    => test.fail("the second cell is there")
+                Some(c) => test.assert_eq(c.id, "x2")
+            test.assert_eq(list.len(nbvalidate.check(up)), 0)
+
+@test
+fn test_a_code_cell_with_no_count_member_has_never_run()
+    // The member is optional and the oldest files do not carry it: a
+    // code cell without one is a cell that never ran, and there is
+    // nothing to report, because nothing was lost.
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"outputs\":[]}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 0)
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) =>
+                    match c.execution_count
+                        Some(_) => test.fail("it never ran")
+                        None    => test.assert(true)
+
+@test
+fn test_a_code_cell_with_no_outputs_member_names_it()
+    // The one member a code cell must carry.  A missing one is the
+    // reader's issue, and the recovery is the empty list.
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":null}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 1)
+            test.assert_eq(nberror.code_of(list.get(r.issues, 0)), "missing-member")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 0)),
+                           "/cells/0/outputs")
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) => test.assert_eq(list.len(c.outputs), 0)
+
+@test
+fn test_a_data_member_that_is_not_an_object_is_no_bundle()
+    // `data` that is there and is not an object: the payload is dropped
+    // and named, rather than made into a bundle that would be a lie.
+    let cell = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":null,\"outputs\":[{\"output_type\":\"display_data\","
+             + "\"data\":[],\"metadata\":{}}]}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 1)
+            test.assert_eq(nberror.code_of(list.get(r.issues, 0)), "wrong-member-type")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 0)),
+                           "/cells/0/outputs/0/data")
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) =>
+                    let o = list.get(c.outputs, 0)
+                    match o
+                        NbDisplayData(d, m)      => test.assert_eq(list.len(nbcell.bundle_mimes(d)), 0)
+                        NbStream(n, x)           => test.fail("a display")
+                        NbExecuteResult(n, d, m) => test.fail("a display")
+                        NbErrorOutput(a, b, tb)  => test.fail("a display")
+
+@test
+fn test_an_execute_result_count_that_is_there_but_wrong_is_reported()
+    // The member is required here, and a member that is there and is
+    // not an integer is the same issue as a member that is not there:
+    // the model has an `Int`, so the recovery is zero.  A fractional
+    // number is the case `json.to_int` would have truncated in
+    // silence — `is_integer` is what stops it.
+    let head = "{\"cell_type\":\"code\",\"source\":\"x\",\"metadata\":{},\"id\":\"a1\","
+             + "\"execution_count\":null,\"outputs\":[{\"output_type\":\"execute_result\","
+             + "\"data\":{},\"metadata\":{},\"execution_count\":"
+    for shown in ["1.5", "\"first\""]
+        let cell = head + shown + "}]}"
+        match nbread.read(notebook45(cell))
+            Err(e) => test.fail(e.message())
+            Ok(r)  =>
+                test.assert_eq(list.len(r.issues), 1)
+                test.assert_eq(nberror.code_of(list.get(r.issues, 0)),
+                               "bad-execution-count")
+                test.assert_eq(nberror.path_of(list.get(r.issues, 0)),
+                               "/cells/0/outputs/0/execution_count")
+                match nbnotebook.cell_at(r.notebook, 0)
+                    None    => test.fail("the cell is there")
+                    Some(c) =>
+                        let o = list.get(c.outputs, 0)
+                        match o
+                            NbExecuteResult(count, d, m) => test.assert_eq(count, 0)
+                            NbStream(n, x)               => test.fail("an execute result")
+                            NbDisplayData(d, m)          => test.fail("an execute result")
+                            NbErrorOutput(a, b, tb)      => test.fail("an execute result")
+
+@test
+fn test_read_strict_of_text_that_is_not_json_is_the_readers_refusal()
+    // The strict reading does not decorate the reader's own refusal:
+    // text that does not parse is `not-json` either way.
+    match nbread.read_strict("{\"cells\":[]")
+        Ok(_)  => test.fail("that is not a document")
+        Err(e) => test.assert_eq(nberror.code_of(e), "not-json")
+
+@test
+fn test_a_source_array_with_an_element_that_is_not_a_string_is_reported()
+    // The array spelling is a list of strings, and one that is not a
+    // string makes the whole member unusable: the source is dropped and
+    // the member is named as the wrong shape, not the element, because
+    // a source is read as one thing.
+    let cell = "{\"cell_type\":\"markdown\",\"source\":[\"# T\",7],\"metadata\":{},"
+             + "\"id\":\"a1\"}"
+    match nbread.read(notebook45(cell))
+        Err(e) => test.fail(e.message())
+        Ok(r)  =>
+            test.assert_eq(list.len(r.issues), 1)
+            test.assert_eq(nberror.code_of(list.get(r.issues, 0)), "wrong-member-type")
+            test.assert_eq(nberror.path_of(list.get(r.issues, 0)), "/cells/0/source")
+            match nbnotebook.cell_at(r.notebook, 0)
+                None    => test.fail("the cell is there")
+                Some(c) => test.assert_eq(c.source, "")
+
+@test
+fn test_is_notebook_says_no_to_text_that_is_not_json()
+    test.assert(not nbread.is_notebook("{\"cells\":[]"))
+    test.assert(nbread.is_notebook("{\"nbformat\":4,\"nbformat_minor\":5,\"cells\":[]}"))
+
+@test
+fn test_a_cell_metadata_that_is_not_an_object_is_a_blocking_cell_issue()
+    // A cell judged on its own, which is what an editor does: the
+    // metadata rule is the same one, at the cell's own root.
+    let c = nbcell.with_metadata(nbcell.code_cell("a1", "x"), json.array([]))
+    let issues = nbvalidate.check_cell(c, 4, 5)
+    test.assert_eq(list.len(issues), 1)
+    let i = list.get(issues, 0)
+    test.assert_eq(nberror.code_of(i.fault), "wrong-member-type")
+    test.assert_eq(i.path, "/metadata")
+    test.assert(i.blocking)
+
+@test
+fn test_an_execute_result_with_a_negative_count_is_reported()
+    // A count below zero is not a count.  The rule is the validator's
+    // and not the reader's, because zero is legitimate and only the
+    // negative values are impossible.
+    //
+    // It is reported and NOT blocking, which is the module's own line:
+    // the writer can put the number back exactly as the file had it, so
+    // refusing to write would throw away what the file said without
+    // gaining a document the format accepts.
+    let o = NbExecuteResult(-1, nbcell.bundle(), empty_object())
+    let issues = nbvalidate.check_output(o, 4, 5)
+    test.assert_eq(list.len(issues), 1)
+    let i = list.get(issues, 0)
+    test.assert_eq(nberror.code_of(i.fault), "bad-execution-count")
+    test.assert_eq(i.path, "/execution_count")
+    test.assert(not i.blocking)
+    test.assert_eq(list.len(nbvalidate.check_output(
+                                NbExecuteResult(0, nbcell.bundle(), empty_object()),
+                                4, 5)),
+                                0)
+
+@test
+fn test_the_blocking_issues_are_the_ones_a_refusal_names()
+    // `write` refuses over the blocking set and no other, so the two
+    // answers have to be the same list: this notebook has one issue
+    // that stops the save — a 4.5 cell with no identifier — and one
+    // that does not, a duplicated identifier, which the writer can put
+    // back exactly as it found it.
+    let a = nbcell.code_cell("", "x")
+    let b = nbcell.code_cell("a1", "y")
+    let c = nbcell.code_cell("a1", "z")
+    let nb = nbnotebook.with_cells(nbnotebook.notebook(), [a, b, c])
+    test.assert_eq(list.len(nbvalidate.check(nb)), 2)
+    let blocking = nbvalidate.blocking_issues(nb)
+    test.assert_eq(list.len(blocking), 1)
+    test.assert(list.get(blocking, 0).blocking)
+    test.assert_eq(nberror.code_of(list.get(blocking, 0).fault), "missing-member")
+    test.assert(not nbvalidate.is_valid(nb))
+
+@test
+fn test_the_members_a_code_cell_may_carry()
+    // The rule behind `NbForbiddenMember`, asked about the kind that
+    // must carry the two members every other kind may not.
+    let allowed = nbvalidate.allowed_members(NbCode, 4, 5)
+    test.assert_eq(list.len(allowed), 6)
+    test.assert(list.contains(allowed, "outputs"))
+    test.assert(list.contains(allowed, "execution_count"))
+    test.assert(list.contains(allowed, "id"))
+    test.assert(not list.contains(nbvalidate.allowed_members(NbCode, 4, 4), "id"))
+    test.assert(not list.contains(nbvalidate.allowed_members(NbMarkdown, 4, 5),
+                                 "outputs"))
+
+@test
+fn test_a_text_payload_that_is_not_a_string_is_written_as_it_stands()
+    // The split is for a `text/*` payload that IS a string; an object
+    // under one is written as the object it is, because splitting it
+    // would invent lines nobody wrote.
+    let b = nbcell.bundle_with(nbcell.bundle(), "text/plain", empty_object())
+    let c = nbcell.with_outputs(nbcell.code_cell("a1", "x"), [NbDisplayData(b, empty_object())])
+    match nbwrite.write_cell(c)
+        Err(e) => test.fail(e.message())
+        Ok(t)  => test.assert(str.contains(t, "\"text/plain\": {}"))
+
+@test
+fn test_a_cell_that_cannot_be_written_on_its_own_is_refused()
+    // The refusal `write_cell` shares with `write`, reached through the
+    // one rule every 4.x version has: a member a kind may not carry.
+    let bad = nbcell.with_outputs(nbcell.markdown_cell("a1", "x"), [NbStream("stdout", "y")])
+    match nbwrite.write_cell(bad)
+        Ok(_)  => test.fail("a markdown cell carries no outputs")
+        Err(e) => test.assert_eq(nberror.code_of(e), "not-writable-at")
+
+@test
+fn test_a_notebook_that_cannot_be_written_is_not_a_json_value_either()
+    // `to_json` is the same document without the bytes, so it refuses
+    // over the same set `write` does and for the same reason.
+    let nb = nbnotebook.append(nbnotebook.notebook(), nbcell.code_cell("", "x"))
+    match nbwrite.to_json(nb)
+        Ok(_)  => test.fail("a 4.5 cell has an identifier")
+        Err(e) => test.assert_eq(nberror.code_of(e), "not-writable-at")
+    match nbwrite.to_json(nbnotebook.notebook())
+        Err(e) => test.fail(e.message())
+        Ok(j)  => test.assert_eq(json.type_of(j), "object")

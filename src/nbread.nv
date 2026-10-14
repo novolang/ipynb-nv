@@ -1,8 +1,5 @@
 // nbread — JSON text to a notebook.
 //
-// Every body is a `todo()`.  The signatures are the design, and the
-// compiler checks them as claims; see the README for the stamp.
-//
 // THE READER IS TOLERANT AND THE VALIDATOR IS NOT.  A notebook comes
 // out of a repository, a shared drive or somebody's laptop, and a tool
 // that refused to open one because its third cell was missing an
@@ -25,17 +22,45 @@
 // an output with an unknown `output_type` is dropped for the same
 // reason; an `execution_count` that is not an integer becomes `None`.
 // Every one of those is an issue in the result.
+//
+// NOTHING IS DROPPED QUIETLY, AND NOTHING IS INVENTED.  A member the
+// reader does not recognise is kept exactly as the file wrote it —
+// `metadata` and a MIME bundle are arbitrary JSON and are carried
+// through untouched, which is what makes a notebook written by a newer
+// nbformat survive a load and a save.  The recoveries above are the
+// whole of what this reader changes, and each of them costs the model
+// something, which is why each of them is reported.
+
+use std.json
+use std.list
+use std.math
+use std.str
+use nbcell
+use nbnotebook
+use nbvalidate
 
 // A notebook, and what was wrong with the file it came from.
 //
-// The issues are the shape rules `nbvalidate` applies plus the
-// recoveries the reader performed, in document order.
+// The issues are the recoveries the reader performed, followed by the
+// shape rules `nbvalidate` applies to the notebook it produced.  The
+// first list is what the reader could not keep; the second is what it
+// kept and the format does not allow.  A recovery that leaves its
+// value in the model — a missing cell identifier, which is carried as
+// the empty string — is not in the first list, because the second one
+// already names it, and reporting it twice would make the count a lie.
 pub struct NbReading
     // The notebook, with the recoveries already applied.
     notebook: NbNotebook
     // What the file did that the format does not allow.  Empty for a
     // notebook that satisfies its own version's rules.
     issues: [NbFault]
+
+// A notebook format version.
+pub struct NbVersion
+    // The major version.
+    major: Int
+    // The minor version, or `0` when the member is absent.
+    minor: Int
 
 // A notebook from the text of a `.ipynb` file.
 //
@@ -53,14 +78,365 @@ pub struct NbReading
 //         Ok(r)  => println("${nbnotebook.cell_count(r.notebook)}")   // 0
 // ```
 pub fn read(text: Str) -> Result<NbReading, NbFault> []
-    todo("ipynb-nv.nbread.read")
+    match json.parse(text)
+        None    => Err(NbNotJson(0))
+        Some(j) => read_json(j)
+
+// The version a parsed document declares, or the refusal.
+//
+// The four fatal checks, in the order a person reads them: is it an
+// object, does it name a format, is the format one this package reads.
+fn version_of(j: JsonValueH) -> Result<NbVersion, NbFault> []
+    if json.type_of(j) != "object"
+        return Err(NbNotAnObject)
+    var major = 0
+    match json.get_int(j, "nbformat")
+        None    =>
+            return Err(NbNoFormatVersion)
+        Some(v) =>
+            major = v
+    let minor = json.get_int(j, "nbformat_minor") ?? 0
+    if major != 4
+        return Err(NbUnsupportedFormat(major, minor))
+    Ok(NbVersion { major: major, minor: minor })
+
+// One member of a JSON object as a string, or `""` with an issue.
+fn str_member(j: JsonValueH, name: Str, path: Str, var issues: [NbFault]) -> Str []
+    match json.get_str(j, name)
+        None    =>
+            list.push(issues, NbMissingMember(path + "/" + name, name))
+            ""
+        Some(s) => s
+
+// The metadata member of a cell or of a notebook: an object, or `{}`
+// with an issue.
+//
+// The one member that carries a tool's own keys, so `{}` is the right
+// recovery and losing it would lose everything a tool had put there.
+fn metadata_of(j: JsonValueH, path: Str, var issues: [NbFault]) -> JsonValueH []
+    let empty: JsonValueH = json.object([])
+    match json.get(j, "metadata")
+        None    =>
+            list.push(issues, NbMissingMember(path + "/metadata", "metadata"))
+            empty
+        Some(v) =>
+            if json.type_of(v) == "object"
+                return v
+            list.push(issues,
+                      NbWrongMemberType(path + "/metadata", "an object", json.type_of(v)))
+            empty
+
+// A member that is a multiline string — a cell's `source` or a stream's
+// `text` — with either spelling collapsed to one text.
+//
+// THE ARRAY SPELLING IS THE ONE THIS PACKAGE WRITES.  nbformat's own
+// writer splits a source and a stream's text into lines, so a reader
+// that knew only the string spelling would lose the text of every
+// stream in a file it had written itself, and would report a member
+// that is plainly there as missing.  `nbcell.split_lines` is the
+// writer's half of the same rule, and `nbcell.join_lines` the join:
+// element boundaries are newlines, and the last element keeps whatever
+// it ends with, which is what makes a text with no trailing newline
+// come back without one.
+fn multiline_member(j: JsonValueH, name: Str, path: Str, var issues: [NbFault]) -> Str []
+    match json.get(j, name)
+        None    =>
+            list.push(issues, NbMissingMember(path + "/" + name, name))
+            ""
+        Some(v) =>
+            match multiline(v)
+                None    =>
+                    list.push(issues,
+                              NbWrongMemberType(path + "/" + name,
+                                                "a multiline string",
+                                                json.type_of(v)))
+                    ""
+                Some(s) => s
+
+// The identifier member of a cell.
+//
+// A MISSING IDENTIFIER IS NOT AN ISSUE HERE.  Below 4.5 the member does
+// not exist and the empty string is the whole truth about the cell; at
+// 4.5 and above the empty string is exactly what `nbvalidate` refuses,
+// so the complaint is made once, by the validator, rather than here and
+// again there.  A member that is present and is not a string IS an
+// issue here, because the reader throws away whatever it held.
+fn id_of(j: JsonValueH, path: Str, var issues: [NbFault]) -> Str []
+    match json.get(j, "id")
+        Some(v) =>
+            match json.to_str(v)
+                Some(s) => s
+                None    =>
+                    list.push(issues,
+                              NbWrongMemberType(path + "/id", "a string", json.type_of(v)))
+                    ""
+        None    => ""
+
+// Whether a JSON value is an integer: `4`, `4.0` and `1e2` are, `1.5` is
+// not, and a string, a boolean, an object or a null is not either.
+//
+// `std.json` has one number kind — `json.type_of` answers "number" for
+// `4`, `4.0` and `1.5` alike — and `json.to_int` CASTS rather than
+// checks, so `json.to_int(1.5)` is `1` and a reader that took the count
+// that way would turn a file that breaks the format's own rule into a
+// silent rewrite with no issue to show for it.  A zero fractional part
+// is the rule the schema's `integer` means, and `math.floor` is that
+// test exactly.
+fn is_integer(v: JsonValueH) -> Bool []
+    match json.to_float(v)
+        None    => false
+        Some(f) => f == math.floor(f)
+
+// The execution count of a code cell: an integer, or `None` for a cell
+// that has not run.
+//
+// A JSON `null` is the documented spelling of "has not run" and is not
+// an issue; a value of another type is, because the model keeps only
+// `None` — and so is a number with a fractional part, which the model
+// also has nowhere to keep and which `to_int` would silently truncate.
+fn count_of(j: JsonValueH, path: Str, var issues: [NbFault]) -> ?Int []
+    match json.get(j, "execution_count")
+        None    => None
+        Some(v) =>
+            if json.is_null(v)
+                return None
+            if is_integer(v)
+                return json.to_int(v)
+            list.push(issues, NbBadExecutionCount(path + "/execution_count"))
+            None
+
+// A MIME bundle from an object member, or an empty bundle with an
+// issue.
+fn bundle_member(j: JsonValueH, name: Str, path: Str, var issues: [NbFault]) -> NbMimeBundle []
+    match json.get(j, name)
+        None    =>
+            list.push(issues, NbMissingMember(path + "/" + name, name))
+            nbcell.bundle()
+        Some(v) =>
+            if json.type_of(v) == "object"
+                let b = read_bundle(v)
+                return b
+            list.push(issues,
+                      NbWrongMemberType(path + "/" + name, "an object", json.type_of(v)))
+            nbcell.bundle()
+
+// The traceback of an error output: every element as one line, each
+// with its own escapes left alone.
+fn traceback_of(j: JsonValueH, path: Str, var issues: [NbFault]) -> [Str] []
+    var out: [Str] = []
+    match json.get_list(j, "traceback")
+        None        =>
+            list.push(issues, NbMissingMember(path + "/traceback", "traceback"))
+        Some(items) =>
+            for i in 0..list.len(items)
+                let item = list.get(items, i)
+                match json.to_str(item)
+                    Some(s) => list.push(out, s)
+                    None    =>
+                        list.push(issues,
+                                  NbWrongMemberType(path + "/traceback/" + str.from_int(i),
+                                                    "a string",
+                                                    json.type_of(item)))
+    out
+
+// The execution count of an `execute_result`, which the format requires
+// and which the model has no way to leave out.
+//
+// An integer, by the same test the code cell's count gets: a member that
+// is missing, of another type, or a number with a fractional part is the
+// issue `required_count` reports, and zero is the recovery.
+fn required_count(j: JsonValueH, path: Str, var issues: [NbFault]) -> Int []
+    match json.get(j, "execution_count")
+        None    =>
+            list.push(issues, NbBadExecutionCount(path + "/execution_count"))
+            0
+        Some(v) =>
+            if is_integer(v)
+                return json.to_int(v) ?? 0
+            list.push(issues, NbBadExecutionCount(path + "/execution_count"))
+            0
+
+// One output from a JSON object, collecting what had to be recovered.
+fn read_output_at(j: JsonValueH, path: Str, var issues: [NbFault]) -> ?NbOutput []
+    if json.type_of(j) != "object"
+        list.push(issues, NbWrongMemberType(path, "an object", json.type_of(j)))
+        return None
+    var t = ""
+    match json.get_str(j, "output_type")
+        None    =>
+            list.push(issues, NbMissingMember(path + "/output_type", "output_type"))
+            return None
+        Some(s) =>
+            t = s
+    match t
+        "stream"         =>
+            // `name` is required by the format and is one of two words;
+            // the recovery names the common one, and the issue says the
+            // member was not there.
+            var name = str_member(j, "name", path, issues)
+            if name == ""
+                name = "stdout"
+            Some(NbStream(name, multiline_member(j, "text", path, issues)))
+        "display_data"   =>
+            let data = bundle_member(j, "data", path, issues)
+            let metadata = metadata_of(j, path, issues)
+            Some(NbDisplayData(data, metadata))
+        "execute_result" =>
+            let count = required_count(j, path, issues)
+            let data = bundle_member(j, "data", path, issues)
+            let metadata = metadata_of(j, path, issues)
+            Some(NbExecuteResult(count, data, metadata))
+        "error"          =>
+            let ename = str_member(j, "ename", path, issues)
+            let evalue = str_member(j, "evalue", path, issues)
+            let traceback = traceback_of(j, path, issues)
+            Some(NbErrorOutput(ename, evalue, traceback))
+        _                =>
+            list.push(issues, NbUnknownOutputType(path, t))
+            None
+
+// The outputs of a cell: every output read, an unknown one dropped and
+// named.
+//
+// `required` is true for a code cell, where the format requires the
+// member, and false for the two kinds that may not carry it — a cell
+// that has one anyway is not robbed of it here, because the validator
+// is the thing that gets to say it does not belong.
+fn outputs_of(j: JsonValueH, path: Str, required: Bool, var issues: [NbFault]) -> [NbOutput] []
+    var out: [NbOutput] = []
+    match json.get(j, "outputs")
+        None    =>
+            if required
+                list.push(issues, NbMissingMember(path + "/outputs", "outputs"))
+        Some(v) =>
+            match json.get_list(j, "outputs")
+                None     =>
+                    list.push(issues,
+                              NbWrongMemberType(path + "/outputs", "an array", json.type_of(v)))
+                Some(xs) => read_output_list(xs, path, out, issues)
+    out
+
+// Every output of one cell's array, in order.
+fn read_output_list(items: [JsonValueH], path: Str, var out: [NbOutput], var issues: [NbFault])
+    for i in 0..list.len(items)
+        let opath = path + "/outputs/" + str.from_int(i)
+        let o = read_output_at(list.get(items, i), opath, issues)
+        match o
+            None    => ()
+            Some(v) => list.push(out, v)
+
+// The attachments of a markdown cell, each a name and a bundle.
+fn attachments_of(j: JsonValueH, path: Str, var issues: [NbFault]) -> [NbAttachment] []
+    var out: [NbAttachment] = []
+    match json.get(j, "attachments")
+        None    => ()
+        Some(v) =>
+            if json.type_of(v) != "object"
+                list.push(issues,
+                          NbWrongMemberType(path + "/attachments",
+                                            "an object",
+                                            json.type_of(v)))
+            if json.type_of(v) == "object"
+                for name in json.keys(v)
+                    let apath = path + "/attachments/" + name
+                    match json.get(v, name)
+                        // cov: skip — `json.keys` reports the members that ARE there, so the
+                        // lookup for one of its own names cannot answer `None`
+                        None    => ()
+                        Some(b) =>
+                            if json.type_of(b) == "object"
+                                let bundle = read_bundle(b)
+                                list.push(out, nbcell.attachment(name, bundle))
+                            else
+                                list.push(issues, NbBadAttachment(apath, name))
+    out
+
+// One cell from a JSON object, collecting what had to be recovered.
+//
+// `None` for a cell this package cannot show: an object that is not an
+// object, or a `cell_type` that names nothing here.  Everything else is
+// recovered in place, so a file with one unknown cell still opens.
+fn read_cell_at(j: JsonValueH, minor: Int, path: Str, var issues: [NbFault]) -> ?NbCell []
+    if json.type_of(j) != "object"
+        list.push(issues, NbWrongMemberType(path, "an object", json.type_of(j)))
+        return None
+    var kind = NbRaw
+    match json.get_str(j, "cell_type")
+        None    =>
+            list.push(issues, NbMissingMember(path + "/cell_type", "cell_type"))
+            return None
+        Some(t) =>
+            match nbcell.kind_named(t)
+                None    =>
+                    list.push(issues, NbUnknownCellType(path, t))
+                    return None
+                Some(k) =>
+                    kind = k
+    let name = nbcell.kind_name(kind)
+    let source = multiline_member(j, "source", path, issues)
+    let metadata = metadata_of(j, path, issues)
+    let id = id_of(j, path, issues)
+    let outputs = outputs_of(j, path, name == "code", issues)
+    var count: ?Int = None
+    if name == "code"
+        count = count_of(j, path, issues)
+    let attachments = attachments_of(j, path, issues)
+    Some(NbCell {
+        id: id,
+        kind: kind,
+        source: source,
+        metadata: metadata,
+        outputs: outputs,
+        execution_count: count,
+        attachments: attachments })
+
+// The cells of a notebook, in order, collecting what had to be
+// recovered.
+fn read_cells_of(j: JsonValueH, minor: Int, var out: [NbCell], var issues: [NbFault])
+    match json.get(j, "cells")
+        None    =>
+            list.push(issues, NbMissingMember("/cells", "cells"))
+        Some(v) =>
+            match json.get_list(j, "cells")
+                None     =>
+                    list.push(issues,
+                              NbWrongMemberType("/cells", "an array", json.type_of(v)))
+                Some(xs) => read_cell_list(xs, minor, out, issues)
+
+// Every cell of one `cells` array, in order.
+fn read_cell_list(items: [JsonValueH], minor: Int, var out: [NbCell], var issues: [NbFault])
+    for i in 0..list.len(items)
+        let cpath = "/cells/" + str.from_int(i)
+        let c = read_cell_at(list.get(items, i), minor, cpath, issues)
+        match c
+            None    => ()
+            Some(v) => list.push(out, v)
 
 // The same, from a JSON value the caller has already parsed.
 //
 // For the caller that got the notebook out of a JSON API rather than
 // out of a file, and for a test that builds one.
 pub fn read_json(j: JsonValueH) -> Result<NbReading, NbFault> []
-    todo("ipynb-nv.nbread.read_json")
+    var major = 0
+    var minor = 0
+    match version_of(j)
+        Err(e) =>
+            return Err(e)
+        Ok(v)  =>
+            major = v.major
+            minor = v.minor
+    var issues: [NbFault] = []
+    let metadata = metadata_of(j, "", issues)
+    var cells: [NbCell] = []
+    read_cells_of(j, minor, cells, issues)
+    let nb = NbNotebook {
+        major: major,
+        minor: minor,
+        metadata: metadata,
+        cells: cells }
+    for issue in nbvalidate.check(nb)
+        list.push(issues, issue.fault)
+    Ok(NbReading { notebook: nb, issues: issues })
 
 // A notebook from text, with the first shape issue fatal.
 //
@@ -76,7 +452,12 @@ pub fn read_json(j: JsonValueH) -> Result<NbReading, NbFault> []
 //         Ok(_)  => println("a notebook that satisfies its own version")
 // ```
 pub fn read_strict(text: Str) -> Result<NbNotebook, NbFault> []
-    todo("ipynb-nv.nbread.read_strict")
+    match read(text)
+        Err(e) => Err(e)
+        Ok(r)  =>
+            match list.first(r.issues)
+                Some(f) => Err(f)
+                None    => Ok(r.notebook)
 
 // The format version the text declares, without reading the cells.
 //
@@ -94,14 +475,9 @@ pub fn read_strict(text: Str) -> Result<NbNotebook, NbFault> []
 //         Ok(v)  => println("${v.major}.${v.minor}")   // 4.5
 // ```
 pub fn format_version(text: Str) -> Result<NbVersion, NbFault> []
-    todo("ipynb-nv.nbread.format_version")
-
-// A notebook format version.
-pub struct NbVersion
-    // The major version.
-    major: Int
-    // The minor version, or `0` when the member is absent.
-    minor: Int
+    match json.parse(text)
+        None    => Err(NbNotJson(0))
+        Some(j) => version_of(j)
 
 // One cell from a JSON object.
 //
@@ -110,12 +486,14 @@ pub struct NbVersion
 // `None` for an object whose `cell_type` this package does not know,
 // which is the one recovery that loses a cell.
 pub fn read_cell(j: JsonValueH) -> ?NbCell []
-    todo("ipynb-nv.nbread.read_cell")
+    var issues: [NbFault] = []
+    read_cell_at(j, 5, "", issues)
 
 // One output from a JSON object, or `None` for an unknown
 // `output_type`.
 pub fn read_output(j: JsonValueH) -> ?NbOutput []
-    todo("ipynb-nv.nbread.read_output")
+    var issues: [NbFault] = []
+    read_output_at(j, "", issues)
 
 // One MIME bundle from a JSON object.
 //
@@ -124,7 +502,14 @@ pub fn read_output(j: JsonValueH) -> ?NbOutput []
 // still an array of lines here, and `nbcell.bundle_text` is what
 // collapses it.
 pub fn read_bundle(j: JsonValueH) -> NbMimeBundle []
-    todo("ipynb-nv.nbread.read_bundle")
+    var entries: [NbMimeEntry] = []
+    for mime in json.keys(j)
+        match json.get(j, mime)
+            // cov: skip — `json.keys` reports the members that ARE there, so the lookup
+            // for one of its own names cannot answer `None`
+            None    => ()
+            Some(v) => list.push(entries, NbMimeEntry { mime: mime, payload: v })
+    NbMimeBundle { entries: entries }
 
 // The text of a multiline string, whichever of its two spellings the
 // value uses, or `None` for a value that is neither.
@@ -145,7 +530,20 @@ pub fn read_bundle(j: JsonValueH) -> NbMimeBundle []
 //                 None    => println("not a multiline string")
 // ```
 pub fn multiline(j: JsonValueH) -> ?Str []
-    todo("ipynb-nv.nbread.multiline")
+    match json.to_str(j)
+        Some(s) => Some(s)
+        None    =>
+            match json.to_list(j)
+                Some(items) =>
+                    var parts: [Str] = []
+                    for item in items
+                        match json.to_str(item)
+                            Some(s) => list.push(parts, s)
+                            None    =>
+                                return None
+                    let text = nbcell.join_lines(parts)
+                    Some(text)
+                None        => None
 
 // Whether the text is a notebook this package will read at all.
 //
@@ -159,4 +557,9 @@ pub fn multiline(j: JsonValueH) -> ?Str []
 //     println("${nbread.is_notebook("{}")}")   // false
 // ```
 pub fn is_notebook(text: Str) -> Bool []
-    todo("ipynb-nv.nbread.is_notebook")
+    match json.parse(text)
+        None    => false
+        Some(j) =>
+            match version_of(j)
+                Err(e) => false
+                Ok(v)  => v.major == 4

@@ -7,12 +7,6 @@ output that code produced, in one JSON file with the extension
 and this package reads, checks and writes the current version of it,
 4.5, in novo-lang.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
-
 ## What a notebook is
 
 A `.ipynb` file is one JSON object with four members.
@@ -52,6 +46,11 @@ whose values are the same thing rendered each of those ways: a table as
 `application/json`. A consumer picks the rendering it can show. A
 payload under `text/*` is text; a payload under `application/json` or a
 type ending in `+json` is a JSON value; anything else is base64 text.
+nbformat's own schema is stricter than that reading: it wants a
+multiline string under every MIME type, so a JSON document under a
+`+json` type — what a charting tool writes for its own renderer — is
+carried through untouched and reported as `bad-mime-payload`. It does
+not block a save; `read_strict` refuses on it, because the schema does.
 
 nbformat calls a `source`, a stream's `text` and a text MIME payload a
 **multiline string**, and defines it as *either* a JSON string *or* a
@@ -98,10 +97,9 @@ fn main() [io]
                 Ok(out) => println(out)
 ```
 
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a
-`not implemented: ipynb-nv.<module>.<fn>` panic. The tests are the
-specification the implementation will have to satisfy.
+Build and test with `novo pkg build` and `novo test`. The suite under
+`tests/` is the specification the implementation was fitted to, and the
+assertions in it are the behaviour this package promises.
 
 ## What the package contains
 
@@ -251,9 +249,9 @@ The oracle is **nbformat's own test suite**: the `.ipynb` files it ships
 version — each of which its `validate` accepts or rejects, and its
 round-trip test, which reads a file, writes it and compares the bytes.
 The cases in this package's suite are those files reduced to the
-smallest document that shows the same rule, and the whole directory
-becomes a generated run beside the hand suite when the implementation
-lands.
+smallest document that shows the same rule. The directory of real
+`.ipynb` files itself is not generated into a run: the suite reads
+text, so a case is the text of a notebook rather than a path.
 
 ```bash
 novo test tests/ipynb_tests.nv    # the document, the cells, the writer, the rules
@@ -267,34 +265,6 @@ line's newline, that the writer sorts its keys and ends with a newline,
 that canonicalising is idempotent from the second call, that a 4.5
 notebook with an identifierless cell is not written, and that the cell
 identifier rule applies at 4.5 and not at 4.4.
-
-The tests compile today and fail at run, each on the
-`not implemented: ipynb-nv.<module>.<fn>` panic that is its body. That
-is the expected state of an interface release. They turn green one at a
-time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| `nbcell.NbCell`, `.NbOutput`, `.NbMimeBundle`, `nbnotebook.NbNotebook` and the other types | the types are declared |
-| `nberror.path_of`, `.code_of`, `.is_fatal`, `NbFault.message` | no |
-| `nbcell.code_cell`, `.markdown_cell`, `.raw_cell`, `.kind_name`, `.kind_named` | no |
-| `nbcell.is_valid_cell_id`, `.cell_id`, `.with_outputs`, `.cleared`, `.with_execution_count`, `.with_source`, `.with_metadata`, `.with_attachment`, `.attachment` | no |
-| `nbcell.stdout_text`, `.first_error`, `.output_type_name` | no |
-| `nbcell.bundle`, `.bundle_with`, `.bundle_get`, `.bundle_mimes`, `.bundle_prefer`, `.bundle_text`, `.bundle_bytes`, `.is_base64_mime` | no |
-| `nbcell.split_lines`, `.join_lines` | no |
-| `nbnotebook.notebook`, `.notebook_at`, `.cell_count`, `.cell_at`, `.cell_by_id`, `.index_of` | no |
-| `nbnotebook.append`, `.insert`, `.replace_at`, `.remove_at`, `.with_cells`, `.with_metadata` | no |
-| `nbnotebook.kernel_name`, `.language_name`, `.cleared`, `.code_source`, `.cells_of_kind` | no |
-| `nbnotebook.upgraded`, `.cells_without_id`, `.duplicate_ids` | no |
-| `nbread.read`, `.read_json`, `.read_strict`, `.format_version`, `.is_notebook` | no |
-| `nbread.read_cell`, `.read_output`, `.read_bundle`, `.multiline` | no |
-| `nbwrite.write`, `.write_at`, `.to_json`, `.write_cell` | no |
-| `nbwrite.is_canonical`, `.canonicalise`, `.member_order`, `.indent_width` | no |
-| `nbvalidate.check`, `.check_at`, `.first_issue`, `.is_valid`, `.blocking_issues` | no |
-| `nbvalidate.check_cell`, `.check_output`, `.check_bundle`, `.first_issue_of_cell`, `.issue_text` | no |
-| `nbvalidate.allowed_members`, `.required_members` | no |
 
 ## Licence
 
